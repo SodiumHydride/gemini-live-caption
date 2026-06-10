@@ -114,11 +114,13 @@
       .lines {
         overflow: hidden;
         background: rgba(0,0,0,.78);
+        width: 100%;
       }
 
       /* Sliding track — moves up by one line-height per new subtitle */
       .track {
         transition: transform .35s cubic-bezier(.16,1,.3,1);
+        width: 100%;
       }
 
       /* Each subtitle line — identical styling */

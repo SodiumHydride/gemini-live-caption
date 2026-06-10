@@ -228,12 +228,12 @@ function processMessage(text, resolve, reject) {
 function sendSetupMessage() {
   const targetLang = currentSettings.targetLanguage || 'zh-Hans';
 
-  // Official setup format for gemini-3.5-live-translate-preview
+  // Setup format for gemini-3.5-live-translate-preview
   // See: https://ai.google.dev/gemini-api/docs/live-api/live-translate
   //
-  // CRITICAL: Uses translationConfig, NOT speechConfig.
-  // CRITICAL: inputAudioTranscription/outputAudioTranscription go at SETUP level,
-  //           NOT inside generationConfig. Server rejects them inside generationConfig.
+  // CRITICAL: transcription configs go at SETUP level, NOT inside generationConfig.
+  // Official docs show them inside generationConfig, but translate model rejects that.
+  // sessionResumption: seamless reconnection on GoAway.
   const setupMsg = {
     setup: {
       model: 'models/gemini-3.5-live-translate-preview',
