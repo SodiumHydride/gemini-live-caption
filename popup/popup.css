@@ -1,0 +1,602 @@
+/* ============================================================
+   popup.css — Gemini Live Caption · Premium Dark Glassmorphism
+   ============================================================
+   A cinematic dark UI with layered glass panels, luminous
+   gradients, and buttery-smooth micro-interactions.
+   ============================================================ */
+
+/* ── Reset & Foundation ──────────────────────────────────── */
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  /* Palette */
+  --bg-deep:        #07070d;
+  --bg-surface:     #0e0e18;
+  --bg-panel:       rgba(255, 255, 255, 0.03);
+  --border-glass:   rgba(255, 255, 255, 0.06);
+  --border-hover:   rgba(255, 255, 255, 0.12);
+  --text-primary:   #f0f0f5;
+  --text-secondary: rgba(240, 240, 245, 0.55);
+  --text-tertiary:  rgba(240, 240, 245, 0.35);
+
+  /* Accent spectrum */
+  --accent-start:   #6366f1;
+  --accent-end:     #a855f7;
+  --accent-glow:    rgba(99, 102, 241, 0.35);
+
+  /* Active / capturing — teal-emerald */
+  --active-start:   #10b981;
+  --active-end:     #06d6a0;
+  --active-glow:    rgba(16, 185, 129, 0.35);
+
+  /* Danger */
+  --danger:         #ef4444;
+
+  /* Radii */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* Timing */
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+body {
+  width: 360px;
+  max-height: 540px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+
+  /* Scrollbar — thin, unobtrusive */
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.08) transparent;
+}
+
+body::-webkit-scrollbar { width: 4px; }
+body::-webkit-scrollbar-track { background: transparent; }
+body::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.10);
+  border-radius: 4px;
+}
+
+/* ── Popup Container ─────────────────────────────────────── */
+.popup-container {
+  position: relative;
+  padding: 20px;
+  min-height: 100%;
+
+  /* Layered gradient background with grain-like texture */
+  background:
+    radial-gradient(ellipse 120% 60% at 75% -10%, rgba(99, 102, 241, 0.10) 0%, transparent 60%),
+    radial-gradient(ellipse 100% 50% at 10% 100%, rgba(168, 85, 247, 0.07) 0%, transparent 55%),
+    linear-gradient(180deg, #0a0a12 0%, #0c0c1a 40%, #0e0e1c 100%);
+}
+
+/* Subtle animated shimmer overlay */
+.popup-container::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle 200px at 80% 15%, rgba(99,102,241,0.06), transparent),
+    radial-gradient(circle 160px at 20% 85%, rgba(168,85,247,0.04), transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.popup-container > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* ── Header ──────────────────────────────────────────────── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo-icon {
+  width: 42px;
+  height: 42px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.08) inset,
+    0 4px 16px rgba(99, 102, 241, 0.30);
+  flex-shrink: 0;
+}
+
+.logo-text h1 {
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+  line-height: 1.2;
+}
+
+.logo-text .subtitle {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  letter-spacing: 0.02em;
+}
+
+/* ── Status Badge ────────────────────────────────────────── */
+.status-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  transition: all 0.4s var(--ease-out-expo);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: background 0.3s ease, box-shadow 0.3s ease;
+  flex-shrink: 0;
+}
+
+/* Active — pulsing green */
+.status-dot.active {
+  background: var(--active-start);
+  box-shadow: 0 0 6px var(--active-glow);
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+
+/* Starting — pulsing amber */
+.status-dot.starting {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.35);
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.5; transform: scale(0.75); }
+}
+
+/* ── Toggle Button (Hero Element) ────────────────────────── */
+.toggle-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 15px 20px;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+  transition:
+    transform 0.25s var(--ease-out-expo),
+    box-shadow 0.35s var(--ease-out-expo),
+    filter 0.25s ease;
+
+  /* Default gradient — purple/indigo */
+  background: linear-gradient(135deg, var(--accent-start) 0%, var(--accent-end) 100%);
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.10) inset,
+    0 4px 20px var(--accent-glow),
+    0 1px 3px rgba(0,0,0,0.4);
+}
+
+/* Inner shimmer on the button */
+.toggle-btn::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    135deg,
+    rgba(255,255,255,0.12) 0%,
+    rgba(255,255,255,0) 40%,
+    rgba(255,255,255,0.04) 100%
+  );
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+
+/* Animated glow ring behind button */
+.toggle-btn::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  z-index: -1;
+  opacity: 0;
+  filter: blur(16px);
+  transition: opacity 0.4s ease;
+}
+
+.toggle-btn:hover {
+  transform: translateY(-1px);
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.14) inset,
+    0 8px 32px var(--accent-glow),
+    0 2px 6px rgba(0,0,0,0.3);
+}
+
+.toggle-btn:hover::after {
+  opacity: 0.5;
+}
+
+.toggle-btn:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.toggle-btn:disabled {
+  filter: brightness(0.65) saturate(0.7);
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Active / Capturing state — teal gradient */
+.toggle-btn.active {
+  background: linear-gradient(135deg, var(--active-start) 0%, var(--active-end) 100%);
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.12) inset,
+    0 4px 20px var(--active-glow),
+    0 1px 3px rgba(0,0,0,0.4);
+}
+
+.toggle-btn.active::after {
+  background: linear-gradient(135deg, var(--active-start), var(--active-end));
+}
+
+.toggle-btn.active:hover {
+  box-shadow:
+    0 0 0 1px rgba(255,255,255,0.16) inset,
+    0 8px 32px var(--active-glow),
+    0 2px 6px rgba(0,0,0,0.3);
+}
+
+.toggle-icon {
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+}
+
+.toggle-label {
+  line-height: 1;
+}
+
+/* ── Divider ─────────────────────────────────────────────── */
+.divider {
+  height: 1px;
+  margin: 18px 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    var(--border-glass) 20%,
+    rgba(255,255,255,0.08) 50%,
+    var(--border-glass) 80%,
+    transparent 100%
+  );
+}
+
+/* ── Settings Panel ──────────────────────────────────────── */
+.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.setting-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.03em;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.setting-value {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-start);
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Input (API Key) ─────────────────────────────────────── */
+.input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.setting-input {
+  width: 100%;
+  padding: 10px 42px 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition:
+    border-color 0.25s ease,
+    background 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.setting-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.setting-input:focus {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
+}
+
+.eye-btn {
+  position: absolute;
+  right: 4px;
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 15px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  transition: background 0.2s ease, transform 0.15s ease;
+}
+
+.eye-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.eye-btn:active {
+  transform: scale(0.92);
+}
+
+/* ── Select (Language) ───────────────────────────────────── */
+.setting-select {
+  width: 100%;
+  padding: 10px 36px 10px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  transition:
+    border-color 0.25s ease,
+    background 0.25s ease,
+    box-shadow 0.25s ease;
+
+  /* Custom chevron */
+  background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5l5 5 5-5' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px;
+}
+
+.setting-select:focus {
+  border-color: rgba(99, 102, 241, 0.5);
+  background-color: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
+}
+
+.setting-select option {
+  background: #1a1a2e;
+  color: var(--text-primary);
+  padding: 8px;
+}
+
+/* ── Segmented Control (Font Size) ───────────────────────── */
+.segmented-control {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-glass);
+}
+
+.seg-btn {
+  flex: 1;
+  padding: 8px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.25s var(--ease-out-expo),
+    color 0.25s ease,
+    box-shadow 0.25s ease,
+    transform 0.15s ease;
+}
+
+.seg-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.seg-btn:active {
+  transform: scale(0.96);
+}
+
+.seg-btn.active {
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  color: #fff;
+  box-shadow:
+    0 2px 8px rgba(99, 102, 241, 0.25),
+    0 0 0 1px rgba(255,255,255,0.08) inset;
+}
+
+/* ── Range Slider (Opacity) ──────────────────────────────── */
+.setting-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.setting-range:hover {
+  background: rgba(255, 255, 255, 0.09);
+}
+
+/* Track — WebKit */
+.setting-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 3px;
+}
+
+/* Thumb — WebKit */
+.setting-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+  margin-top: -6px;
+  box-shadow:
+    0 2px 8px rgba(99, 102, 241, 0.30),
+    0 0 0 0 rgba(99, 102, 241, 0);
+  transition:
+    box-shadow 0.25s ease,
+    transform 0.15s ease;
+}
+
+.setting-range::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow:
+    0 2px 12px rgba(99, 102, 241, 0.45),
+    0 0 0 4px rgba(99, 102, 241, 0.10);
+}
+
+.setting-range:active::-webkit-slider-thumb {
+  transform: scale(1.05);
+}
+
+/* Thumb — Firefox */
+.setting-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.30);
+}
+
+.setting-range::-moz-range-track {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border: none;
+}
+
+/* ── Footer ──────────────────────────────────────────────── */
+.footer {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-glass);
+  text-align: center;
+}
+
+.shortcut-hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  letter-spacing: 0.02em;
+}
+
+kbd {
+  display: inline-block;
+  padding: 2px 7px;
+  margin: 0 2px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(255, 255, 255, 0.04);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.25);
+}
+
+/* ── Focus Visible (Accessibility) ───────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--accent-start);
+  outline-offset: 2px;
+}
+
+/* ── Reduced Motion ──────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

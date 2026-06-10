@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Live Caption",
+  "version": "1.0.0",
+  "description": "Real-time AI-powered subtitle translation using Gemini Live API. Replaces Chrome's native Live Caption with Gemini-powered translation.",
+  "permissions": ["tabCapture", "offscreen", "storage"],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Gemini Live Caption"
+  },
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "commands": {
+    "toggle-capture": {
+      "suggested_key": { "default": "Alt+C" },
+      "description": "Toggle live caption"
+    }
+  }
+}
