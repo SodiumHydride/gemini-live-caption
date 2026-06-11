@@ -1,14 +1,8 @@
 // offscreen.js — Audio Capture + Gemini Live Translate WebSocket
 // Runs in an offscreen document with full Web API access.
-//
-// Key design decisions (from official docs 2026-06-09):
-// - gemini-3.5-live-translate-preview is NOT a conversation model.
-//   It's a continuous streaming translation pipeline: audio in → translated audio out.
-//   No system instructions, no tools, no text input.
-// - Audio chunks: 100ms (official recommendation for live-translate).
-// - Setup uses translationConfig, NOT speechConfig.
-// - Session management: contextWindowCompression + sessionResumption for long sessions.
-// - GoAway: server sends this before disconnecting; handle it proactively.
+
+const DEBUG = false;
+const dbg = (...args) => { if (DEBUG) console.log('[Offscreen]', ...args); };
 
 let audioContext = null;
 let mediaStream = null;
@@ -101,7 +95,7 @@ async function startCapture(streamId, settings) {
 
   // 2. Create AudioContext at native sample rate (no resampling for playback)
   const inputSampleRate = mediaStream.getAudioTracks()[0]?.getSettings()?.sampleRate || 48000;
-  console.log(`[Offscreen] Input audio sample rate: ${inputSampleRate}Hz`);
+  dbg(`Input audio sample rate: ${inputSampleRate}Hz`);
   audioContext = new AudioContext({ sampleRate: inputSampleRate });
   const source = audioContext.createMediaStreamSource(mediaStream);
 
@@ -164,7 +158,7 @@ async function startCapture(streamId, settings) {
   // Write initial heartbeat immediately
   chrome.storage?.session?.set({ lastHeartbeat: Date.now() }).catch(() => {});
 
-  console.log('[Offscreen] Capture started successfully');
+  dbg('Capture started successfully');
 }
 
 function stopCapture() {
@@ -209,7 +203,7 @@ function stopCapture() {
   }
 
   sendStatus('idle', 'Caption stopped');
-  console.log('[Offscreen] Capture stopped');
+  dbg('Capture stopped');
 }
 
 // ==================== GEMINI WEBSOCKET ====================
@@ -220,12 +214,12 @@ async function connectWebSocket() {
     const apiKey = currentSettings.apiKey;
     const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
 
-    console.log('[Offscreen] Connecting to Gemini Live Translate...');
+    dbg('Connecting to Gemini Live Translate...');
     setupComplete = false;
     websocket = new WebSocket(wsUrl);
 
     websocket.onopen = () => {
-      console.log('[Offscreen] WebSocket connected, sending setup...');
+      dbg('WebSocket connected, sending setup...');
       sendSetupMessage();
     };
 
@@ -247,12 +241,12 @@ async function connectWebSocket() {
     };
 
     websocket.onclose = (event) => {
-      console.log(`[Offscreen] WebSocket closed: code=${event.code}, reason=${event.reason}, isCapturing: ${isCapturing}`);
+      dbg(`WebSocket closed: code=${event.code}, isCapturing: ${isCapturing}`);
       if (isCapturing) {
         sendStatus('reconnecting', 'Connection lost, reconnecting...');
         scheduleReconnect();
       } else {
-        console.log('[Offscreen] WebSocket closed but isCapturing is false, not reconnecting');
+        dbg('WebSocket closed, not reconnecting');
       }
     };
 
@@ -268,7 +262,7 @@ async function connectWebSocket() {
 function processMessage(text, resolve, reject) {
   try {
     const raw = JSON.parse(text);
-    console.log('[Offscreen] Received:', JSON.stringify(raw).substring(0, 500));
+    dbg('Received:', JSON.stringify(raw).substring(0, 200));
   } catch (e) {}
 
   handleGeminiResponse(text);
@@ -323,8 +317,7 @@ function sendSetupMessage() {
   };
 
   websocket.send(JSON.stringify(setupMsg));
-  console.log(`[Offscreen] Setup sent: live-translate → ${targetLang}`);
-  console.log('[Offscreen] Setup message:', JSON.stringify(setupMsg, null, 2));
+  dbg(`Setup sent: live-translate → ${targetLang}`);
 }
 
 // ==================== AUDIO STREAMING ====================
@@ -381,7 +374,7 @@ function handleGeminiResponse(data) {
 
     // Setup complete confirmation
     if (msg.setupComplete) {
-      console.log('[Offscreen] Gemini setup complete');
+      dbg('Gemini setup complete');
       sendStatus('capturing', 'Connected to Gemini 3.5 Live Translate');
       return;
     }
@@ -399,14 +392,14 @@ function handleGeminiResponse(data) {
       if (update.resumable && update.newHandle) {
         sessionResumptionHandle = update.newHandle;
         chrome.storage.session.set({ sessionResumptionHandle: update.newHandle }).catch(() => {});
-        console.log('[Offscreen] Session resumption handle saved');
+        dbg('Session resumption handle saved');
       }
     }
 
     // GoAway — server is about to disconnect, proactively reconnect
     if (msg.goAway) {
       console.warn(`[Offscreen] GoAway received, time left: ${msg.goAway.timeLeft}`);
-      console.log(`[Offscreen] isCapturing: ${isCapturing}, websocket state: ${websocket?.readyState}`);
+      dbg(`isCapturing: ${isCapturing}, websocket state: ${websocket?.readyState}`);
       if (isCapturing) {
         sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
         reconnectWebSocket();
@@ -429,11 +422,11 @@ function handleGeminiResponse(data) {
       if (sc.outputTranscription?.finished) signals.push('outFinished');
       if (sc.outputTranscription?.text) signals.push(`outText(${sc.outputTranscription.text.length})`);
       if (sc.inputTranscription?.text) signals.push(`inText(${sc.inputTranscription.text.length})`);
-      if (signals.length) console.debug('[Offscreen] Signals:', signals.join(', '));
+      if (signals.length) dbg('Signals:', signals.join(', '));
 
       // Interrupted — clear buffer immediately
       if (sc.interrupted) {
-        console.log('[Offscreen] Generation interrupted');
+        dbg('Generation interrupted');
         partialText = '';
         sendCaption('', false);
         return;
@@ -512,13 +505,10 @@ function handleGeminiResponse(data) {
 
       // Generation complete — log only
       if (sc.generationComplete) {
-        console.debug('[Offscreen] Generation complete');
+        dbg('Generation complete');
       }
 
-      // Input transcription — original language
-      if (sc.inputTranscription && sc.inputTranscription.text) {
-        console.log(`[Offscreen] Original (${sc.inputTranscription.languageCode || '?'}): ${sc.inputTranscription.text}`);
-      }
+      // Input transcription — language detection (text not logged for privacy)
     }
   } catch (err) {
     console.error('[Offscreen] Failed to parse Gemini response:', err, data);
@@ -527,7 +517,7 @@ function handleGeminiResponse(data) {
 
 // ==================== RECONNECTION ====================
 function scheduleReconnect() {
-  console.log(`[Offscreen] scheduleReconnect called, reconnectAttempts: ${reconnectAttempts}, reconnectTimer: ${reconnectTimer}`);
+  dbg(`scheduleReconnect called, attempts: ${reconnectAttempts}`);
   if (reconnectTimer) return;
 
   if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -540,15 +530,15 @@ function scheduleReconnect() {
   // Exponential backoff: 3s, 6s, 12s, 24s, 48s
   const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts);
   reconnectAttempts++;
-  console.log(`[Offscreen] Scheduling reconnect #${reconnectAttempts} in ${delay}ms...`);
+  dbg(`Scheduling reconnect #${reconnectAttempts} in ${delay}ms...`);
 
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
-    console.log(`[Offscreen] Reconnect timer fired, isCapturing: ${isCapturing}`);
+    dbg(`Reconnect timer fired, isCapturing: ${isCapturing}`);
     if (!isCapturing) return;
     try {
       await connectWebSocket();
-      console.log('[Offscreen] Reconnected successfully');
+      dbg('Reconnected successfully');
       reconnectAttempts = 0; // Reset on successful reconnect
     } catch (err) {
       console.error('[Offscreen] Reconnect failed:', err);
@@ -558,7 +548,7 @@ function scheduleReconnect() {
 }
 
 function reconnectWebSocket() {
-  console.log('[Offscreen] reconnectWebSocket called');
+  dbg('reconnectWebSocket called');
   if (websocket) {
     websocket.onclose = null;
     websocket.close();
@@ -571,7 +561,7 @@ function reconnectWebSocket() {
   setupComplete = false;
   partialText = '';
   connectWebSocket().then(() => {
-    console.log('[Offscreen] Reconnect successful');
+    dbg('Reconnect successful');
     reconnectAttempts = 0; // Reset on successful reconnect
   }).catch(err => {
     console.error('[Offscreen] Reconnect failed:', err);
@@ -596,4 +586,4 @@ function sendStatus(status, message) {
   }).catch(() => {});
 }
 
-console.log('[Offscreen] Offscreen document loaded');
+dbg('Offscreen document loaded');

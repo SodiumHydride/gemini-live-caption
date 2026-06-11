@@ -201,6 +201,14 @@ chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
   }
 });
 
+// Sender validation helpers
+function isFromPopup(sender) {
+  return sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}/popup/`);
+}
+function isFromOffscreen(sender) {
+  return sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}/offscreen`);
+}
+
 // Handle messages from popup, offscreen, and content scripts
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'TOGGLE_CAPTURE') {
@@ -226,6 +234,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'CAPTION_UPDATE') {
+    if (!isFromOffscreen(sender)) return false;
     (async () => {
       const { activeTabId } = await chrome.storage.session.get('activeTabId');
       if (activeTabId) {
@@ -236,7 +245,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             isFinal: msg.isFinal,
           });
         } catch (err) {
-          console.warn('[SW] Failed to send caption to tab:', err.message);
+          // Content script may not be injected yet
         }
       }
     })();
@@ -244,18 +253,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'STATUS_UPDATE') {
+    if (!isFromOffscreen(sender)) return false;
     (async () => {
-      console.log(`[SW] Status: ${msg.status} - ${msg.message}`);
       await updateBadge(msg.status);
     })();
     return false;
   }
 
   if (msg.type === 'SAVE_SETTINGS') {
+    if (!isFromPopup(sender)) return false;
     (async () => {
-      await chrome.storage.local.set(msg.settings);
+      // Validate settings schema — only allow known keys with correct types
+      const allowed = {};
+      if (typeof msg.settings?.apiKey === 'string') allowed.apiKey = msg.settings.apiKey;
+      if (typeof msg.settings?.targetLanguage === 'string') allowed.targetLanguage = msg.settings.targetLanguage;
+      if (['small', 'medium', 'large'].includes(msg.settings?.fontSize)) allowed.fontSize = msg.settings.fontSize;
+      if (typeof msg.settings?.bgOpacity === 'number' && msg.settings.bgOpacity >= 0 && msg.settings.bgOpacity <= 1) {
+        allowed.bgOpacity = msg.settings.bgOpacity;
+      }
+      if (Object.keys(allowed).length === 0) {
+        sendResponse({ success: false, error: 'No valid settings' });
+        return;
+      }
+      await chrome.storage.local.set(allowed);
       try {
-        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: msg.settings });
+        await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: allowed });
       } catch (e) {
         // Offscreen may not exist yet
       }
@@ -265,8 +287,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'AUDIO_LOST') {
+    if (!isFromOffscreen(sender)) return false;
     (async () => {
-      console.log('[SW] Audio track lost, restarting capture');
       const { activeTabId, captureState } = await chrome.storage.session.get(['activeTabId', 'captureState']);
       if (captureState === 'capturing' && activeTabId) {
         try {
@@ -287,10 +309,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'HEARTBEAT') {
+    if (!isFromOffscreen(sender)) return false;
     // Heartbeat from offscreen document — keeps this SW alive (resets 30s idle timer).
-    // The actual lastHeartbeat timestamp is written by offscreen directly to
-    // chrome.storage.session; this handler only exists so the message itself
-    // resets the SW idle clock.
     return false;
   }
 });
