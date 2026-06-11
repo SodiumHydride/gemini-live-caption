@@ -1,5 +1,7 @@
 # Gemini Live Caption
 
+English | [中文](README_zh.md)
+
 Real-time translated subtitles for any browser tab, powered by Google Gemini.
 
 Capture tab audio → stream to Gemini Live Translate → display translated captions as a floating overlay with optional Picture-in-Picture window.
