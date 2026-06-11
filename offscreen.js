@@ -15,7 +15,6 @@ let wsGeneration = 0;       // Tracks WebSocket connection generation; stopCaptu
 let currentSettings = {};
 
 // Session management state
-let sessionResumptionHandle = null;  // For seamless reconnection across WebSocket resets
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const BASE_RECONNECT_DELAY = 3000; // 3s, doubles each attempt
@@ -75,14 +74,6 @@ async function startCapture(streamId, settings) {
 
   // Reset session state
   reconnectAttempts = 0;
-
-  // Restore session resumption handle from persistent storage (survives offscreen重建)
-  try {
-    const stored = await chrome.storage.session.get('sessionResumptionHandle');
-    sessionResumptionHandle = stored.sessionResumptionHandle ?? null;
-  } catch {
-    sessionResumptionHandle = null;
-  }
 
   // 1. Get the media stream from the tab
   mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -165,8 +156,6 @@ async function startCapture(streamId, settings) {
 function stopCapture() {
   isCapturing = false;
   wsGeneration++;  // Invalidate any in-flight WebSocket connections
-  // Do NOT clear sessionResumptionHandle here — AUDIO_LOST triggers a restart
-  // that reads the handle from storage. Clearing it would break session resumption.
 
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
@@ -296,31 +285,23 @@ function sendSetupMessage() {
   // Setup format for gemini-3.5-live-translate-preview
   // See: https://ai.google.dev/gemini-api/docs/live-api/live-translate
   //
-  // CRITICAL: transcription configs and contextWindowCompression go at SETUP level,
-  // NOT inside generationConfig. Official docs show them inside generationConfig,
-  // but the live-translate model rejects that.
-  // sessionResumption: seamless reconnection on GoAway (token valid 2 hours).
+  // Proven pattern (kazunori279/live-translator, yangping4271/live-translator):
+  // - No sessionResumption: causes translation cascade bugs (prev turn prepended to current)
+  // - No contextWindowCompression: unnecessary for streaming translation, no history to compress
+  // - GoAway → fresh session each time (98% pass rate vs 65% with resumption)
+  // - Transcription configs inside generationConfig per official docs
   const setupMsg = {
     setup: {
       model: 'models/gemini-3.5-live-translate-preview',
       generationConfig: {
         responseModalities: ['AUDIO'],
+        inputAudioTranscription: {},
+        outputAudioTranscription: {},
         translationConfig: {
           targetLanguageCode: targetLang,
           echoTargetLanguage: false,
         },
       },
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
-      contextWindowCompression: {
-        slidingWindow: {},
-      },
-      // Session resumption for seamless reconnection across WebSocket resets
-      ...(sessionResumptionHandle ? {
-        sessionResumption: {
-          handle: sessionResumptionHandle,
-        },
-      } : {}),
     },
   };
 
@@ -394,17 +375,8 @@ function handleGeminiResponse(data) {
       return;
     }
 
-    // Session resumption update — save handle for reconnection
-    if (msg.sessionResumptionUpdate) {
-      const update = msg.sessionResumptionUpdate;
-      if (update.resumable && update.newHandle) {
-        sessionResumptionHandle = update.newHandle;
-        chrome.storage.session.set({ sessionResumptionHandle: update.newHandle }).catch(() => {});
-        dbg('Session resumption handle saved');
-      }
-    }
-
-    // GoAway — server is about to disconnect, proactively reconnect
+    // GoAway — server is about to disconnect, proactively reconnect with fresh session
+    // (no session resumption — community-proven to avoid translation cascade bugs)
     if (msg.goAway) {
       console.warn(`[Offscreen] GoAway received, time left: ${msg.goAway.timeLeft}`);
       dbg(`isCapturing: ${isCapturing}, websocket state: ${websocket?.readyState}`);
