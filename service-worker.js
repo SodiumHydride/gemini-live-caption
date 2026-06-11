@@ -271,6 +271,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (typeof msg.settings?.bgOpacity === 'number' && msg.settings.bgOpacity >= 0 && msg.settings.bgOpacity <= 1) {
         allowed.bgOpacity = msg.settings.bgOpacity;
       }
+      if (typeof msg.settings?.audioGain === 'number' && msg.settings.audioGain >= 1 && msg.settings.audioGain <= 5) {
+        allowed.audioGain = msg.settings.audioGain;
+      }
+      if (['HIGH', 'LOW'].includes(msg.settings?.vadSensitivity)) {
+        allowed.vadSensitivity = msg.settings.vadSensitivity;
+      }
+      if (typeof msg.settings?.noiseGate === 'number' && msg.settings.noiseGate >= 0 && msg.settings.noiseGate <= 0.05) {
+        allowed.noiseGate = msg.settings.noiseGate;
+      }
       if (Object.keys(allowed).length === 0) {
         sendResponse({ success: false, error: 'No valid settings' });
         return;

@@ -83,6 +83,27 @@
         <label class="setting-label">🎨 Background Opacity <span id="opacityValue" class="setting-value">75%</span></label>
         <input type="range" id="bgOpacity" class="setting-range" min="0" max="100" value="75">
       </div>
+
+      <!-- Audio Gain -->
+      <div class="setting-group">
+        <label class="setting-label">🔊 Audio Gain <span id="gainValue" class="setting-value">1.0x</span></label>
+        <input type="range" id="audioGain" class="setting-range" min="10" max="50" value="10" step="1">
+      </div>
+
+      <!-- VAD Sensitivity -->
+      <div class="setting-group">
+        <label class="setting-label">🎙️ Voice Detection</label>
+        <div class="segmented-control" id="vadControl">
+          <button class="seg-btn active" data-value="HIGH">Sensitive</button>
+          <button class="seg-btn" data-value="LOW">Relaxed</button>
+        </div>
+      </div>
+
+      <!-- Noise Gate -->
+      <div class="setting-group">
+        <label class="setting-label">🔇 Noise Gate <span id="gateValue" class="setting-value">Off</span></label>
+        <input type="range" id="noiseGate" class="setting-range" min="0" max="50" value="0" step="1">
+      </div>
     </div>
 
     <!-- Footer -->

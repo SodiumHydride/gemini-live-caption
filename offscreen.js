@@ -42,8 +42,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'UPDATE_SETTINGS') {
     currentSettings = { ...currentSettings, ...msg.settings };
-    if (websocket && websocket.readyState === WebSocket.OPEN) {
-      reconnectWebSocket();
+
+    // Update worklet parameters in real-time (no restart needed)
+    if (workletNode && msg.settings.audioGain !== undefined) {
+      workletNode.port.postMessage({ gain: msg.settings.audioGain });
+    }
+    if (workletNode && msg.settings.noiseGate !== undefined) {
+      workletNode.port.postMessage({ noiseGate: msg.settings.noiseGate });
+    }
+
+    // VAD or language change requires WebSocket reconnect with new setup
+    if (msg.settings.vadSensitivity || msg.settings.targetLanguage) {
+      if (websocket && websocket.readyState === WebSocket.OPEN) {
+        reconnectWebSocket();
+      }
     }
     sendResponse({ success: true });
     return true;
@@ -66,6 +78,9 @@ async function startCapture(streamId, settings) {
   currentSettings = {
     apiKey: settings.apiKey || '',
     targetLanguage: settings.targetLanguage || 'zh-Hans',
+    audioGain: settings.audioGain ?? 1.0,
+    noiseGate: settings.noiseGate ?? 0,
+    vadSensitivity: settings.vadSensitivity ?? 'HIGH',
   };
 
   if (!currentSettings.apiKey) {
@@ -99,6 +114,12 @@ async function startCapture(streamId, settings) {
   await audioContext.audioWorklet.addModule(workletUrl);
   workletNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
   source.connect(workletNode);
+
+  // Send audio processing parameters to worklet
+  workletNode.port.postMessage({
+    gain: currentSettings.audioGain,
+    noiseGate: currentSettings.noiseGate,
+  });
 
   // 5. Handle PCM data from AudioWorklet
   workletNode.port.onmessage = (event) => {
@@ -285,21 +306,25 @@ function sendSetupMessage() {
   // Setup format for gemini-3.5-live-translate-preview
   // See: https://ai.google.dev/gemini-api/docs/live-api/live-translate
   //
-  // Proven pattern (kazunori279/live-translator, yangping4271/live-translator):
-  // - No sessionResumption: causes translation cascade bugs (prev turn prepended to current)
-  // - No contextWindowCompression: unnecessary for streaming translation, no history to compress
-  // - GoAway → fresh session each time (98% pass rate vs 65% with resumption)
-  // - Transcription configs inside generationConfig per official docs
+  // Transcription configs at SETUP level (live-translate rejects them in generationConfig).
+  // GoAway → fresh session (no sessionResumption, no contextWindowCompression).
   const setupMsg = {
     setup: {
       model: 'models/gemini-3.5-live-translate-preview',
       generationConfig: {
         responseModalities: ['AUDIO'],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
         translationConfig: {
           targetLanguageCode: targetLang,
           echoTargetLanguage: false,
+        },
+      },
+      inputAudioTranscription: {},
+      outputAudioTranscription: {},
+      realtimeInputConfig: {
+        automaticActivityDetection: {
+          startOfSpeechSensitivity: currentSettings.vadSensitivity || 'HIGH',
+          endOfSpeechSensitivity: currentSettings.vadSensitivity === 'LOW' ? 'LOW' : 'HIGH',
+          silenceDurationMs: currentSettings.vadSensitivity === 'LOW' ? 800 : 500,
         },
       },
     },

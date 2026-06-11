@@ -12,10 +12,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   const fontSizeControl = document.getElementById('fontSizeControl');
   const bgOpacitySlider = document.getElementById('bgOpacity');
   const opacityValue = document.getElementById('opacityValue');
+  const audioGainSlider = document.getElementById('audioGain');
+  const gainValue = document.getElementById('gainValue');
+  const vadControl = document.getElementById('vadControl');
+  const noiseGateSlider = document.getElementById('noiseGate');
+  const gateValue = document.getElementById('gateValue');
 
   // ==================== LOAD SETTINGS ====================
   const settings = await chrome.storage.local.get([
-    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity'
+    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'vadSensitivity', 'noiseGate'
   ]);
 
   if (settings.apiKey) apiKeyInput.value = settings.apiKey;
@@ -29,6 +34,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     const pct = Math.round(settings.bgOpacity * 100);
     bgOpacitySlider.value = pct;
     opacityValue.textContent = `${pct}%`;
+  }
+  if (settings.audioGain !== undefined) {
+    const val = Math.round(settings.audioGain * 10);
+    audioGainSlider.value = val;
+    gainValue.textContent = `${(val / 10).toFixed(1)}x`;
+  }
+  if (settings.vadSensitivity) {
+    vadControl.querySelectorAll('.seg-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.value === settings.vadSensitivity);
+    });
+  }
+  if (settings.noiseGate !== undefined) {
+    const val = Math.round(settings.noiseGate * 1000);
+    noiseGateSlider.value = val;
+    gateValue.textContent = val === 0 ? 'Off' : `${(val / 1000).toFixed(3)}`;
   }
 
   // ==================== GET CURRENT STATUS ====================
@@ -144,5 +164,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   bgOpacitySlider.addEventListener('change', () => {
     saveSettings({ bgOpacity: parseInt(bgOpacitySlider.value) / 100 });
+  });
+
+  audioGainSlider.addEventListener('input', () => {
+    const val = parseInt(audioGainSlider.value);
+    gainValue.textContent = `${(val / 10).toFixed(1)}x`;
+  });
+
+  audioGainSlider.addEventListener('change', () => {
+    saveSettings({ audioGain: parseInt(audioGainSlider.value) / 10 });
+  });
+
+  vadControl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn');
+    if (!btn) return;
+    vadControl.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    saveSettings({ vadSensitivity: btn.dataset.value });
+  });
+
+  noiseGateSlider.addEventListener('input', () => {
+    const val = parseInt(noiseGateSlider.value);
+    gateValue.textContent = val === 0 ? 'Off' : `${(val / 1000).toFixed(3)}`;
+  });
+
+  noiseGateSlider.addEventListener('change', () => {
+    saveSettings({ noiseGate: parseInt(noiseGateSlider.value) / 1000 });
   });
 });

@@ -30,6 +30,15 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     this.phases = null;
     this.buffer = null;
     this.outputBuffer = null;
+
+    // Audio processing parameters (adjustable via port messages)
+    this.gain = 1.0;        // Multiplier applied to input samples before processing
+    this.noiseGate = 0;     // RMS threshold; chunks below this are zeroed
+
+    this.port.onmessage = (e) => {
+      if (e.data.gain !== undefined) this.gain = e.data.gain;
+      if (e.data.noiseGate !== undefined) this.noiseGate = e.data.noiseGate;
+    };
   }
 
   _initialize(sampleRate) {
@@ -90,8 +99,23 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     const input = inputs[0];
     if (!input || input.length === 0) return true;
 
-    const channelData = input[0]; // Mono, 128 samples per call
+    let channelData = input[0]; // Mono, 128 samples per call
     if (!channelData) return true;
+
+    // Apply gain amplification (only affects audio sent to model, not playback)
+    if (this.gain !== 1.0) {
+      channelData = channelData.map(s => Math.max(-1, Math.min(1, s * this.gain)));
+    }
+
+    // Noise gate: zero out chunks below RMS threshold
+    if (this.noiseGate > 0) {
+      let sumSq = 0;
+      for (let i = 0; i < channelData.length; i++) sumSq += channelData[i] * channelData[i];
+      const rms = Math.sqrt(sumSq / channelData.length);
+      if (rms < this.noiseGate) {
+        channelData = new Float32Array(channelData.length); // silent chunk
+      }
+    }
 
     // Initialize on first call when we know the sample rate
     if (!this.initialized) {
