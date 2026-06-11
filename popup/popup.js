@@ -208,4 +208,46 @@ document.addEventListener('DOMContentLoaded', async () => {
   noiseGateSlider.addEventListener('change', () => {
     saveSettings({ noiseGate: parseInt(noiseGateSlider.value) / 1000 });
   });
+
+  // ==================== EXPORT DIAGNOSTIC LOGS ====================
+  const exportLogsBtn = document.getElementById('exportLogs');
+  if (exportLogsBtn) {
+    exportLogsBtn.addEventListener('click', async () => {
+      exportLogsBtn.disabled = true;
+      exportLogsBtn.textContent = 'Exporting...';
+
+      try {
+        const response = await chrome.runtime.sendMessage({ type: 'EXPORT_LOGS' });
+        if (response && response.entries && response.entries.length > 0) {
+          // Format logs as readable text
+          const lines = response.entries.map(e => {
+            const ts = new Date(e.ts).toISOString();
+            return `[${ts}] [${e.level.toUpperCase()}] ${e.msg}`;
+          });
+          const logText = lines.join('\n');
+
+          // Copy to clipboard
+          await navigator.clipboard.writeText(logText);
+          exportLogsBtn.textContent = 'Copied!';
+          setTimeout(() => {
+            exportLogsBtn.textContent = 'Export Logs';
+            exportLogsBtn.disabled = false;
+          }, 2000);
+        } else {
+          exportLogsBtn.textContent = 'No logs';
+          setTimeout(() => {
+            exportLogsBtn.textContent = 'Export Logs';
+            exportLogsBtn.disabled = false;
+          }, 2000);
+        }
+      } catch (err) {
+        console.error('Export logs failed:', err);
+        exportLogsBtn.textContent = 'Failed';
+        setTimeout(() => {
+          exportLogsBtn.textContent = 'Export Logs';
+          exportLogsBtn.disabled = false;
+        }, 2000);
+      }
+    });
+  }
 });

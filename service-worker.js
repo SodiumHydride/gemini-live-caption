@@ -272,6 +272,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!isFromOffscreen(sender)) return false;
     (async () => {
       await updateBadge(msg.status);
+      // Forward status to content script for in-page indicator
+      const { activeTabId } = await chrome.storage.session.get('activeTabId');
+      if (activeTabId) {
+        try {
+          await chrome.tabs.sendMessage(activeTabId, {
+            type: 'STATUS_UPDATE',
+            status: msg.status,
+            message: msg.message,
+          });
+        } catch (e) {
+          // Content script might be gone, not critical
+        }
+      }
     })();
     return false;
   }
@@ -350,6 +363,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       console.log('[SW] PiP window closed');
     })();
     return false;
+  }
+
+  if (msg.type === 'EXPORT_LOGS') {
+    if (!isFromPopup(sender)) return false;
+    (async () => {
+      try {
+        const response = await chrome.runtime.sendMessage({ type: 'EXPORT_LOGS', since: msg.since || 0 });
+        sendResponse(response || { entries: [] });
+      } catch (e) {
+        // Offscreen may not exist
+        sendResponse({ entries: [] });
+      }
+    })();
+    return true;
   }
 });
 

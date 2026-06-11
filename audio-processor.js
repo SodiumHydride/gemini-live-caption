@@ -82,8 +82,13 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
       this.bufferWriteIdx = 0;
       this.sampleCount = 0;
     } else {
-      // Non-integer ratio: use simple linear interpolation
-      this.inputBuffer = [];
+      // Non-integer ratio: use ring buffer for linear interpolation
+      // Size: enough to hold resampleRatio * 2 samples (safety margin)
+      this.inputBufferSize = Math.ceil(this.resampleRatio * 2) + 128;
+      this.inputBuffer = new Float32Array(this.inputBufferSize);
+      this.inputWriteIdx = 0;
+      this.inputReadIdx = 0;
+      this.inputAvailable = 0;
     }
 
     // Output accumulation buffer: 100ms at 16kHz = 1600 samples
@@ -102,18 +107,20 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     let channelData = input[0]; // Mono, 128 samples per call
     if (!channelData) return true;
 
-    // Apply gain amplification (only affects audio sent to model, not playback)
+    // Apply gain amplification in-place (only affects audio sent to model, not playback)
     if (this.gain !== 1.0) {
-      channelData = channelData.map(s => Math.max(-1, Math.min(1, s * this.gain)));
+      for (let i = 0; i < channelData.length; i++) {
+        channelData[i] = Math.max(-1, Math.min(1, channelData[i] * this.gain));
+      }
     }
 
-    // Noise gate: zero out chunks below RMS threshold
+    // Noise gate: zero out chunks below RMS threshold (in-place)
     if (this.noiseGate > 0) {
       let sumSq = 0;
       for (let i = 0; i < channelData.length; i++) sumSq += channelData[i] * channelData[i];
       const rms = Math.sqrt(sumSq / channelData.length);
       if (rms < this.noiseGate) {
-        channelData = new Float32Array(channelData.length); // silent chunk
+        channelData.fill(0); // silent chunk in-place
       }
     }
 
@@ -140,20 +147,27 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
         }
       }
     } else {
-      // Non-integer ratio: use linear interpolation
+      // Non-integer ratio: use ring buffer with linear interpolation
       for (let i = 0; i < channelData.length; i++) {
-        this.inputBuffer.push(channelData[i]);
+        // Write to ring buffer
+        this.inputBuffer[this.inputWriteIdx] = channelData[i];
+        this.inputWriteIdx = (this.inputWriteIdx + 1) % this.inputBufferSize;
+        this.inputAvailable++;
 
         // Check if we have enough samples to produce an output
-        while (this.inputBuffer.length >= this.resampleRatio) {
-          const idx = this.inputBuffer.length - this.resampleRatio;
+        while (this.inputAvailable >= this.resampleRatio) {
+          // Calculate read position (relative to read pointer)
+          const idx = this.inputAvailable - this.resampleRatio;
           const idxFloor = Math.floor(idx);
-          const idxCeil = idxFloor + 1;
           const frac = idx - idxFloor;
 
+          // Read samples from ring buffer using pointer arithmetic
+          const readPos0 = (this.inputReadIdx + idxFloor) % this.inputBufferSize;
+          const readPos1 = (readPos0 + 1) % this.inputBufferSize;
+
           // Linear interpolation
-          const sample = this.inputBuffer[idxFloor] * (1 - frac) +
-                        (this.inputBuffer[idxCeil] || this.inputBuffer[idxFloor]) * frac;
+          const sample = this.inputBuffer[readPos0] * (1 - frac) +
+                        this.inputBuffer[readPos1] * frac;
 
           this.outputBuffer[this.outputWriteIdx++] = sample;
 
@@ -162,8 +176,10 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
             this.outputWriteIdx = 0;
           }
 
-          // Remove consumed samples
-          this.inputBuffer.splice(0, Math.floor(this.resampleRatio));
+          // Advance read pointer (consume samples)
+          const consumed = Math.floor(this.resampleRatio);
+          this.inputReadIdx = (this.inputReadIdx + consumed) % this.inputBufferSize;
+          this.inputAvailable -= consumed;
         }
       }
     }

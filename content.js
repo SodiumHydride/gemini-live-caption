@@ -8,7 +8,7 @@
   const STORE_KEY = 'captionLayout';
   const MAX_LINES = 3;
 
-  let shadow, wrap, linesEl, track, placeholder, pipBtn;
+  let shadow, wrap, linesEl, track, placeholder, pipBtn, statusIndicator;
   let fadeTimer = null, capturing = false;
   let layout = { x: null, y: null, w: 560 };
   let lineCount = 0;
@@ -111,6 +111,16 @@
     placeholder.className = 'ph';
     placeholder.textContent = 'Gemini Live Caption';
 
+    // Status indicator — small dot + text showing connection state
+    statusIndicator = document.createElement('div');
+    statusIndicator.className = 'status';
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    const txt = document.createElement('span');
+    txt.className = 'txt';
+    statusIndicator.appendChild(dot);
+    statusIndicator.appendChild(txt);
+
     // Resize handle
     const resize = document.createElement('div');
     resize.className = 'rsz';
@@ -118,6 +128,7 @@
     wrap.appendChild(drag);
     wrap.appendChild(linesEl);
     wrap.appendChild(placeholder);
+    wrap.appendChild(statusIndicator);
     wrap.appendChild(resize);
     wrap.appendChild(pipBtn);
     shadow.appendChild(wrap);
@@ -213,6 +224,23 @@
         display: none;
       }
       .ph.show { display: block; }
+
+      .status {
+        display: flex; align-items: center; justify-content: center; gap: 6px;
+        padding: 4px 10px; font-size: 11px; font-weight: 500;
+        background: var(--cap-bg); color: rgba(255,255,255,.5);
+        opacity: 0; max-height: 0; overflow: hidden;
+        transition: opacity .3s ease, max-height .3s ease, padding .3s ease;
+      }
+      .status.show { opacity: 1; max-height: 30px; padding: 6px 10px; }
+      .status .dot {
+        width: 6px; height: 6px; border-radius: 50%;
+        background: #888; flex-shrink: 0;
+        transition: background .3s;
+      }
+      .status .dot.green { background: #4caf50; }
+      .status .dot.orange { background: #ff9800; }
+      .status .dot.red { background: #f44336; }
 
       .rsz {
         position: absolute; bottom: 0; right: 0;
@@ -362,6 +390,70 @@
     capturing = false;
     currentPartialEl = null;
     currentPartialText = '';
+  }
+
+  // ==================== STATUS INDICATOR ====================
+  let statusHideTimer = null;
+
+  function updateStatus(status, message) {
+    if (!statusIndicator) return;
+
+    const dot = statusIndicator.querySelector('.dot');
+    const txt = statusIndicator.querySelector('.txt');
+    if (!dot || !txt) return;
+
+    // Clear previous hide timer
+    if (statusHideTimer) {
+      clearTimeout(statusHideTimer);
+      statusHideTimer = null;
+    }
+
+    // Set color and text based on status
+    dot.className = 'dot';
+    switch (status) {
+      case 'capturing':
+        dot.classList.add('green');
+        txt.textContent = message || 'Connected';
+        showStatusTemporarily(3000); // Auto-hide after 3s
+        break;
+      case 'reconnecting':
+        dot.classList.add('orange');
+        txt.textContent = message || 'Reconnecting...';
+        showStatus(); // Stay visible
+        break;
+      case 'error':
+        dot.classList.add('red');
+        txt.textContent = message || 'Error';
+        showStatus(); // Stay visible
+        break;
+      case 'idle':
+      default:
+        txt.textContent = message || '';
+        hideStatus();
+        break;
+    }
+  }
+
+  function showStatus() {
+    if (!statusIndicator) return;
+    // Show the main container too if hidden
+    if (!wrap.classList.contains('vis')) {
+      wrap.classList.add('vis');
+      placeholder.classList.remove('show');
+    }
+    statusIndicator.classList.add('show');
+  }
+
+  function showStatusTemporarily(duration) {
+    showStatus();
+    statusHideTimer = setTimeout(() => {
+      hideStatus();
+    }, duration);
+  }
+
+  function hideStatus() {
+    if (!statusIndicator) return;
+    statusIndicator.classList.remove('show');
   }
 
   // ==================== LAYOUT ====================
@@ -566,7 +658,7 @@
           try {
             const oldHost = document.getElementById(HOST_ID);
             if (oldHost) oldHost.remove();
-            shadow = wrap = linesEl = track = placeholder = null;
+            shadow = wrap = linesEl = track = placeholder = statusIndicator = null;
             viewportLocked = false;
             lineCount = 0;
             currentPartialEl = null;
@@ -588,6 +680,9 @@
         postToPiP({ type: 'CLEAR_CAPTIONS' });
         // Hide PiP button when capture stops
         if (pipBtn) pipBtn.classList.remove('vis');
+        updateStatus('idle', '');
+      } else if (msg.type === 'STATUS_UPDATE') {
+        updateStatus(msg.status, msg.message);
       }
     } catch (e) {
       if (e.message && e.message.includes('Extension context invalidated')) {

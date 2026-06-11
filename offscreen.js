@@ -4,6 +4,52 @@
 const DEBUG = false;
 const dbg = (...args) => console.log('[Offscreen]', ...args);
 
+// ==================== DIAGNOSTIC LOG BUFFER ====================
+// Ring buffer storing recent log entries for debugging without DevTools.
+// Users can export this via the popup when something goes wrong.
+const LOG_BUFFER_SIZE = 200;
+const logBuffer = new Array(LOG_BUFFER_SIZE);
+let logWriteIdx = 0;
+let logCount = 0;
+
+function _logEntry(level, ...args) {
+  const entry = {
+    ts: Date.now(),
+    level,
+    msg: args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' '),
+  };
+  logBuffer[logWriteIdx] = entry;
+  logWriteIdx = (logWriteIdx + 1) % LOG_BUFFER_SIZE;
+  logCount = Math.min(logCount + 1, LOG_BUFFER_SIZE);
+}
+
+// Override console methods to capture into ring buffer
+const _origLog = console.log;
+const _origWarn = console.warn;
+const _origError = console.error;
+
+console.log = (...args) => { _logEntry('log', ...args); _origLog.apply(console, args); };
+console.warn = (...args) => { _logEntry('warn', ...args); _origWarn.apply(console, args); };
+console.error = (...args) => { _logEntry('error', ...args); _origError.apply(console, args); };
+
+function getLogEntries(since = 0) {
+  const entries = [];
+  const count = Math.min(logCount, LOG_BUFFER_SIZE);
+  const startIdx = logCount >= LOG_BUFFER_SIZE ? logWriteIdx : 0;
+  for (let i = 0; i < count; i++) {
+    const idx = (startIdx + i) % LOG_BUFFER_SIZE;
+    const entry = logBuffer[idx];
+    if (entry && entry.ts >= since) entries.push(entry);
+  }
+  return entries;
+}
+
+function clearLogBuffer() {
+  logBuffer.fill(null);
+  logWriteIdx = 0;
+  logCount = 0;
+}
+
 let audioContext = null;
 let mediaStream = null;
 let workletNode = null;
@@ -15,6 +61,11 @@ let wsGeneration = 0;       // Tracks WebSocket connection generation; stopCaptu
 let currentSettings = {};
 let isReconnecting = false; // Guard: prevents watchdog from firing during reconnection
 let resumptionHandle = null; // Session resumption token from Gemini (valid 2h)
+
+// Device change detection: track current output device and rebuild audio chain on switch
+let currentOutputDeviceId = null;
+let deviceChangeDebounceTimer = null;
+const DEVICE_CHANGE_DEBOUNCE_MS = 300;
 
 // Session management state
 let reconnectAttempts = 0;
@@ -81,6 +132,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'PING') {
     // Liveness check from service worker (used by recoverState).
     sendResponse({ alive: isCapturing });
+    return true;
+  }
+
+  if (msg.type === 'EXPORT_LOGS') {
+    const entries = getLogEntries(msg.since || 0);
+    sendResponse({ entries });
     return true;
   }
 });
@@ -166,9 +223,17 @@ async function startCapture(streamId, settings) {
     if (!audioContext) return;
     console.log(`[Offscreen] AudioContext state: ${audioContext.state}`);
     if (audioContext.state === 'suspended' && isCapturing) {
-      audioContext.resume().catch(() => {});
+      audioContext.resume().catch(err => {
+        console.error('[Offscreen] AudioContext resume failed:', err);
+        sendStatus('error', 'Audio suspended and cannot resume');
+      });
     }
   };
+
+  // 8. Monitor audio output device changes (e.g. headphone plug/unplug)
+  //    When the default output device changes, the AudioContext may need full reconstruction.
+  currentOutputDeviceId = await _getCurrentOutputDeviceId();
+  _startDeviceMonitoring();
 
   // 8. Connect to Gemini Live Translate API
   await connectWebSocket();
@@ -181,8 +246,12 @@ async function startCapture(streamId, settings) {
   // verify the offscreen is actually alive after a SW restart.
   heartbeatTimer = setInterval(() => {
     if (!isCapturing) return;
-    chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
-    chrome.storage?.session?.set({ lastHeartbeat: Date.now() }).catch(() => {});
+    chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(err => {
+      console.warn('[Offscreen] Heartbeat failed (SW may be dead):', err.message);
+    });
+    chrome.storage?.session?.set({ lastHeartbeat: Date.now() }).catch(err => {
+      console.warn('[Offscreen] Failed to write heartbeat:', err.message);
+    });
   }, 20000);
   // Write initial heartbeat immediately
   chrome.storage?.session?.set({ lastHeartbeat: Date.now() }).catch(() => {});
@@ -194,6 +263,7 @@ function stopCapture() {
   isCapturing = false;
   wsGeneration++;  // Invalidate any in-flight WebSocket connections
 
+  _stopDeviceMonitoring();
   stopCaptionWatchdog();
   stopSessionRotation();
 
@@ -390,6 +460,8 @@ function sendAudioToGemini(float32Samples) {
     websocket.send(JSON.stringify(audioMsg));
   } catch (err) {
     console.error('[Offscreen] Failed to send audio:', err);
+    sendStatus('error', 'Audio send failed, reconnecting...');
+    reconnectWebSocket();
   }
 }
 
@@ -714,6 +786,138 @@ function parseDuration(str) {
   const match = String(str).match(/(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/);
   if (!match) return 0;
   return (parseInt(match[1] || 0) * 3600 + parseInt(match[2] || 0) * 60 + parseInt(match[3] || 0)) * 1000;
+}
+
+// ==================== DEVICE CHANGE MONITORING ====================
+// Detects audio output device changes (headphone plug/unplug, Bluetooth connect/disconnect).
+// When the default output device changes, the AudioContext's internal routing may become stale,
+// causing silent playback or capture failures. We rebuild the entire audio chain on change.
+
+async function _getCurrentOutputDeviceId() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioOutput = devices.find(d => d.kind === 'audiooutput' && d.deviceId === 'default');
+    return audioOutput?.deviceId || null;
+  } catch (err) {
+    dbg('Failed to enumerate audio devices:', err.message);
+    return null;
+  }
+}
+
+function _startDeviceMonitoring() {
+  if (!navigator.mediaDevices?.addEventListener) {
+    dbg('devicechange monitoring not supported');
+    return;
+  }
+
+  navigator.mediaDevices.addEventListener('devicechange', _onDeviceChange);
+  dbg('Device change monitoring started');
+}
+
+function _stopDeviceMonitoring() {
+  if (!navigator.mediaDevices?.removeEventListener) return;
+  navigator.mediaDevices.removeEventListener('devicechange', _onDeviceChange);
+  if (deviceChangeDebounceTimer) {
+    clearTimeout(deviceChangeDebounceTimer);
+    deviceChangeDebounceTimer = null;
+  }
+}
+
+function _onDeviceChange() {
+  // Debounce: multiple rapid events fire during device switch
+  if (deviceChangeDebounceTimer) clearTimeout(deviceChangeDebounceTimer);
+  deviceChangeDebounceTimer = setTimeout(() => {
+    deviceChangeDebounceTimer = null;
+    _handleDeviceChange();
+  }, DEVICE_CHANGE_DEBOUNCE_MS);
+}
+
+async function _handleDeviceChange() {
+  if (!isCapturing) return;
+
+  const newDeviceId = await _getCurrentOutputDeviceId();
+  dbg(`Device change detected: ${currentOutputDeviceId} → ${newDeviceId}`);
+
+  if (newDeviceId === currentOutputDeviceId) {
+    dbg('Device ID unchanged, ignoring');
+    return;
+  }
+
+  currentOutputDeviceId = newDeviceId;
+  sendStatus('reconnecting', 'Audio device changed, rebuilding...');
+
+  // Full audio chain rebuild: AudioContext → MediaStreamSource → Worklet → WebSocket
+  // We keep the WebSocket alive (no need to reconnect Gemini session),
+  // but the audio capture path must be torn down and rebuilt.
+  await _rebuildAudioChain();
+}
+
+async function _rebuildAudioChain() {
+  dbg('Rebuilding audio chain...');
+
+  // 1. Tear down existing audio nodes (keep WebSocket and mediaStream alive)
+  if (workletNode) {
+    workletNode.disconnect();
+    workletNode = null;
+  }
+
+  if (audioContext) {
+    audioContext.onstatechange = null; // Prevent stale listener
+    await audioContext.close().catch(() => {});
+    audioContext = null;
+  }
+
+  // 2. Recreate AudioContext with the same stream
+  if (!mediaStream) {
+    dbg('No mediaStream available, cannot rebuild');
+    sendStatus('error', 'Audio stream lost during device change');
+    return;
+  }
+
+  const inputSampleRate = mediaStream.getAudioTracks()[0]?.getSettings()?.sampleRate || 48000;
+  audioContext = new AudioContext({ sampleRate: inputSampleRate });
+  const source = audioContext.createMediaStreamSource(mediaStream);
+  source.connect(audioContext.destination);
+
+  // 3. Reload and connect AudioWorklet
+  try {
+    const workletUrl = chrome.runtime.getURL('audio-processor.js');
+    await audioContext.audioWorklet.addModule(workletUrl);
+    workletNode = new AudioWorkletNode(audioContext, 'audio-capture-processor');
+    source.connect(workletNode);
+
+    workletNode.port.postMessage({
+      gain: currentSettings.audioGain,
+      noiseGate: currentSettings.noiseGate,
+    });
+
+    workletNode.port.onmessage = (event) => {
+      if (event.data.type === 'audio-data') {
+        sendAudioToGemini(event.data.samples);
+      }
+    };
+  } catch (err) {
+    console.error('[Offscreen] Failed to rebuild worklet:', err);
+    sendStatus('error', 'Failed to rebuild audio processor');
+    return;
+  }
+
+  // 4. Re-attach AudioContext state monitoring
+  audioContext.onstatechange = () => {
+    if (!audioContext) return;
+    dbg(`AudioContext state: ${audioContext.state}`);
+    if (audioContext.state === 'suspended' && isCapturing) {
+      audioContext.resume().catch(() => {});
+    }
+  };
+
+  // 5. Resume if suspended
+  if (audioContext.state === 'suspended') {
+    await audioContext.resume().catch(() => {});
+  }
+
+  dbg('Audio chain rebuilt successfully');
+  sendStatus('capturing', 'Audio device switched, capture resumed');
 }
 
 // ==================== HELPERS ====================
