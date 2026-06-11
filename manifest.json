@@ -19,5 +19,11 @@
       "suggested_key": { "default": "Alt+C" },
       "description": "Toggle live caption"
     }
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["pip.html", "pip.css", "pip.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }

@@ -76,6 +76,8 @@
     if (lastHeartbeat && (now - lastHeartbeat) < 30000) {
       // Heartbeat is fresh (< 30s old) — offscreen is alive and capturing.
       console.log('[SW] Offscreen alive (heartbeat fresh), capture continues');
+      // Re-inject content script — it may have been lost during SW restart
+      await ensureContentScript(activeTabId);
       await chrome.action.setBadgeText({ text: 'ON' });
       await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
       return;
@@ -92,6 +94,8 @@
       ]);
       if (pong && pong.alive) {
         console.log('[SW] Offscreen responded to PING, capture continues');
+        // Re-inject content script — it may have been lost during SW restart
+        await ensureContentScript(activeTabId);
         await chrome.action.setBadgeText({ text: 'ON' });
         await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
         return;
@@ -128,17 +132,10 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
     return;
   }
 
-  // If switching to a different tab while capturing
+  // If switching to a different tab while capturing — do nothing.
+  // Audio capture stays locked to the original source tab.
   if (captureState === 'capturing' && activeTabId !== tabId) {
-    console.log(`[SW] Tab switched from ${activeTabId} to ${tabId}, migrating capture`);
-    // Clear any pending reload resume — we're switching tabs now
-    await chrome.storage.session.set({ waitingReloadTabId: null });
-    try {
-      await stopCapture();
-    } catch (e) {
-      console.warn('[SW] stopCapture failed during tab switch:', e);
-    }
-    await startCapture(tabId);
+    console.log(`[SW] Tab switched to ${tabId}, keeping capture on source tab ${activeTabId}`);
   }
 });
 
@@ -237,6 +234,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!isFromOffscreen(sender)) return false;
     (async () => {
       const { activeTabId } = await chrome.storage.session.get('activeTabId');
+      // Send to content script in the audio source tab.
+      // content.js acts as the bridge: it renders the overlay AND relays
+      // to the PiP window via postMessage. No broadcast needed — sending
+      // via chrome.runtime.sendMessage would cause content.js to receive
+      // the message twice (once from tabs.sendMessage, once from runtime).
       if (activeTabId) {
         try {
           await chrome.tabs.sendMessage(activeTabId, {
@@ -245,7 +247,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             isFinal: msg.isFinal,
           });
         } catch (err) {
-          // Content script may not be injected yet
+          // Content script lost — re-inject and retry
+          console.warn('[SW] CAPTION_UPDATE delivery failed, re-injecting content script:', err.message);
+          try {
+            await ensureContentScript(activeTabId);
+            // Small delay to let content.js init() create the overlay
+            await new Promise(r => setTimeout(r, 200));
+            // Retry once after re-injection
+            await chrome.tabs.sendMessage(activeTabId, {
+              type: 'CAPTION_UPDATE',
+              text: msg.text,
+              isFinal: msg.isFinal,
+            });
+          } catch (retryErr) {
+            console.error('[SW] CAPTION_UPDATE retry also failed:', retryErr.message);
+          }
         }
       }
     })();
@@ -317,6 +333,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'HEARTBEAT') {
     if (!isFromOffscreen(sender)) return false;
     // Heartbeat from offscreen document — keeps this SW alive (resets 30s idle timer).
+    return false;
+  }
+
+  if (msg.type === 'PIP_OPENED') {
+    (async () => {
+      await chrome.storage.session.set({ pipWindowOpen: true });
+      console.log('[SW] PiP window opened');
+    })();
+    return false;
+  }
+
+  if (msg.type === 'PIP_CLOSED') {
+    (async () => {
+      await chrome.storage.session.set({ pipWindowOpen: false });
+      console.log('[SW] PiP window closed');
+    })();
     return false;
   }
 });
@@ -448,6 +480,8 @@ async function stopCapture() {
       // Content script might be gone
     }
   }
+  // Note: content.js relays CLEAR_CAPTIONS to PiP window via postMessage.
+  // No broadcast via chrome.runtime.sendMessage — would cause double-receive.
 
   await closeOffscreenDocument();
   await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, lastHeartbeat: null });

@@ -53,6 +53,37 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateUI('idle');
   }
 
+  // ==================== PiP STATUS ====================
+  const displayModeInfo = document.querySelector('.display-mode-info');
+
+  async function updatePipStatus() {
+    try {
+      const data = await chrome.storage.session.get('pipWindowOpen');
+      const isActive = !!data.pipWindowOpen;
+      if (displayModeInfo) {
+        displayModeInfo.classList.toggle('pip-active', isActive);
+        // Update the second hint to reflect current state
+        const sub = displayModeInfo.querySelector('.mode-hint-sub');
+        if (sub) {
+          sub.textContent = isActive
+            ? 'PiP window is currently active'
+            : 'PiP window stays visible when you switch tabs';
+        }
+      }
+    } catch (e) {
+      // storage.session may not be available in all contexts
+    }
+  }
+
+  await updatePipStatus();
+
+  // Listen for real-time PiP status changes
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'session' && changes.pipWindowOpen) {
+      updatePipStatus();
+    }
+  });
+
   // ==================== TOGGLE CAPTURE ====================
   toggleBtn.addEventListener('click', async () => {
     // Check API key first

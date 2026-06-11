@@ -1,0 +1,15 @@
+# Chrome extension build artifacts
+*.crx
+*.pem
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Node (if ever used)
+node_modules/

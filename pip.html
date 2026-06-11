@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Live Caption</title>
+  <link rel="stylesheet" href="pip.css">
+  <script src="pip.js" defer></script>
+</head>
+<body>
+  <div id="pip-root">
+    <!-- Top bar: settings + close -->
+    <div id="toolbar">
+      <button id="settings-btn" aria-label="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/>
+        </svg>
+      </button>
+      <button id="close-btn" aria-label="Close">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Subtitle display -->
+    <div id="lines">
+      <div class="track" id="track"></div>
+    </div>
+    <div id="placeholder" class="show">Gemini Live Caption</div>
+
+    <!-- Settings panel (hidden by default) -->
+    <div id="settings-panel" class="hidden">
+      <div class="sp-title">Caption Settings</div>
+      <div class="sp-row">
+        <label>Font Size</label>
+        <div class="sp-seg" id="sp-fontsize">
+          <button data-v="small">S</button>
+          <button data-v="medium" class="on">M</button>
+          <button data-v="large">L</button>
+          <button data-v="xlarge">XL</button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <label>Max Lines</label>
+        <div class="sp-seg" id="sp-maxlines">
+          <button data-v="2">2</button>
+          <button data-v="3" class="on">3</button>
+          <button data-v="4">4</button>
+          <button data-v="5">5</button>
+        </div>
+      </div>
+      <div class="sp-row">
+        <label>Background</label>
+        <input type="range" id="sp-opacity" min="0" max="100" value="80">
+        <span id="sp-opacity-val">80%</span>
+      </div>
+      <div class="sp-row">
+        <label>Text Color</label>
+        <div class="sp-colors" id="sp-color">
+          <button data-v="#ffffff" class="on" style="background:#ffffff"></button>
+          <button data-v="#e0e0e0" style="background:#e0e0e0"></button>
+          <button data-v="#4fc3f7" style="background:#4fc3f7"></button>
+          <button data-v="#81c784" style="background:#81c784"></button>
+          <button data-v="#ffb74d" style="background:#ffb74d"></button>
+          <button data-v="#f48fb1" style="background:#f48fb1"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -2,7 +2,7 @@
 // Runs in an offscreen document with full Web API access.
 
 const DEBUG = false;
-const dbg = (...args) => { if (DEBUG) console.log('[Offscreen]', ...args); };
+const dbg = (...args) => console.log('[Offscreen]', ...args);
 
 let audioContext = null;
 let mediaStream = null;
@@ -13,11 +13,28 @@ let reconnectTimer = null;
 let heartbeatTimer = null;  // Keeps SW alive via periodic messages
 let wsGeneration = 0;       // Tracks WebSocket connection generation; stopCapture increments it
 let currentSettings = {};
+let isReconnecting = false; // Guard: prevents watchdog from firing during reconnection
+let resumptionHandle = null; // Session resumption token from Gemini (valid 2h)
 
 // Session management state
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS = 8;  // More attempts for long sessions
 const BASE_RECONNECT_DELAY = 3000; // 3s, doubles each attempt
+
+// Caption watchdog: if WebSocket is open but no captions arrive for this duration,
+// the session is silently dead (Gemini stopped transcribing). Force reconnect.
+// Only fires when audio IS being sent (silence is not a failure).
+const CAPTION_WATCHDOG_MS = 15000;
+let captionWatchdogTimer = null;
+let lastCaptionTime = 0;
+let lastAudioSendTime = 0;  // Track when audio was last sent to Gemini
+
+// Proactive session rotation: Gemini Live Translate sessions die after ~10 min.
+// Instead of waiting for GoAway or silent death, rotate the session BEFORE it expires.
+// This eliminates caption gaps — the new session is ready before the old one dies.
+const SESSION_ROTATE_MS = 8 * 60 * 1000; // 8 minutes (before the ~10 min limit)
+let sessionRotateTimer = null;
+let sessionStartTime = 0;
 
 // ==================== MESSAGE HANDLER ====================
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -177,6 +194,9 @@ function stopCapture() {
   isCapturing = false;
   wsGeneration++;  // Invalidate any in-flight WebSocket connections
 
+  stopCaptionWatchdog();
+  stopSessionRotation();
+
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
@@ -295,6 +315,8 @@ function processMessage(text, resolve, reject) {
     } catch (e) {}
     setupComplete = true;
     reconnectAttempts = 0;
+    startCaptionWatchdog();
+    startSessionRotation();
     resolve();
   }
 }
@@ -305,22 +327,35 @@ function sendSetupMessage() {
   // Setup format for gemini-3.5-live-translate-preview
   // See: https://ai.google.dev/gemini-api/docs/live-api/live-translate
   //
-  // Transcription configs at SETUP level (live-translate rejects them in generationConfig).
-  // GoAway → fresh session (no sessionResumption, no contextWindowCompression).
-  const setupMsg = {
-    setup: {
-      model: 'models/gemini-3.5-live-translate-preview',
-      generationConfig: {
-        responseModalities: ['AUDIO'],
-        translationConfig: {
-          targetLanguageCode: targetLang,
-          echoTargetLanguage: false,
-        },
+  // Key: contextWindowCompression enables unlimited session duration.
+  // Session resumption allows reconnecting with context preserved.
+  const setupConfig = {
+    model: 'models/gemini-3.5-live-translate-preview',
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      translationConfig: {
+        targetLanguageCode: targetLang,
+        echoTargetLanguage: false,
       },
-      inputAudioTranscription: {},
-      outputAudioTranscription: {},
     },
+    inputAudioTranscription: {},
+    outputAudioTranscription: {},
+    // Session resumption: reconnect with handle to preserve context across the
+    // ~10 min session limit. Does NOT degrade translation quality.
+    // NOTE: contextWindowCompression is intentionally omitted — it causes
+    // audio freezes (#1225) and premature turnComplete (#1227).
+    sessionResumption: {},
   };
+
+  // If we have a resumption handle from a previous session, include it
+  if (resumptionHandle) {
+    setupConfig.sessionResumption = {
+      handle: resumptionHandle,
+    };
+    dbg(`Reconnecting with resumption handle: ${resumptionHandle.substring(0, 20)}...`);
+  }
+
+  const setupMsg = { setup: setupConfig };
 
   websocket.send(JSON.stringify(setupMsg));
   dbg(`Setup sent: live-translate → ${targetLang}`);
@@ -351,6 +386,7 @@ function sendAudioToGemini(float32Samples) {
   };
 
   try {
+    lastAudioSendTime = Date.now();
     websocket.send(JSON.stringify(audioMsg));
   } catch (err) {
     console.error('[Offscreen] Failed to send audio:', err);
@@ -385,6 +421,16 @@ function handleGeminiResponse(data) {
       return;
     }
 
+    // Session resumption handle — save for reconnection (valid 2 hours)
+    if (msg.sessionResumptionUpdate) {
+      const handle = msg.sessionResumptionUpdate.newHandle;
+      if (handle) {
+        resumptionHandle = handle;
+        dbg(`Session resumption handle saved: ${handle.substring(0, 20)}...`);
+      }
+      return;
+    }
+
     // Error response from server
     if (msg.error) {
       console.error('[Offscreen] Server error:', msg.error);
@@ -392,16 +438,22 @@ function handleGeminiResponse(data) {
       return;
     }
 
-    // GoAway — server is about to disconnect, proactively reconnect with fresh session
-    // (no session resumption — community-proven to avoid translation cascade bugs)
+    // GoAway — server is about to disconnect. Parse timeLeft for smart scheduling.
+    // If timeLeft is small (< 5s), reconnect immediately.
+    // If timeLeft is larger, schedule rotation to minimize caption gap.
     if (msg.goAway) {
-      console.warn(`[Offscreen] GoAway received, time left: ${msg.goAway.timeLeft}`);
-      dbg(`isCapturing: ${isCapturing}, websocket state: ${websocket?.readyState}`);
+      const timeLeft = msg.goAway.timeLeft;
+      console.warn(`[Offscreen] GoAway received, time left: ${timeLeft}`);
       if (isCapturing) {
-        sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
-        reconnectWebSocket();
-      } else {
-        console.warn('[Offscreen] GoAway received but isCapturing is false, not reconnecting');
+        if (timeLeft && parseDuration(timeLeft) > 5000) {
+          // Enough time — schedule rotation before disconnect
+          scheduleSessionRotation(parseDuration(timeLeft) - 2000);
+          console.log(`[Offscreen] Scheduled rotation in ${parseDuration(timeLeft) - 2000}ms`);
+        } else {
+          // Imminent disconnect — reconnect now
+          sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
+          reconnectWebSocket();
+        }
       }
       return;
     }
@@ -431,7 +483,11 @@ function handleGeminiResponse(data) {
 
       // Accumulate output transcription text into buffer
       if (sc.outputTranscription && sc.outputTranscription.text) {
+        if (!lastCaptionTime || (Date.now() - lastCaptionTime > 30000)) {
+          dbg(`First caption after ${(Date.now() - (sessionStartTime || Date.now())) / 1000}s gap`);
+        }
         partialText += sc.outputTranscription.text;
+        resetCaptionWatchdog(); // Output arriving = session is alive
         // Show as live preview (isFinal=false)
         if (partialText.trim()) sendCaption(partialText.trim(), false);
 
@@ -505,7 +561,10 @@ function handleGeminiResponse(data) {
         dbg('Generation complete');
       }
 
-      // Input transcription — language detection (text not logged for privacy)
+      // Input transcription — connection is alive, reset watchdog
+      if (sc.inputTranscription && sc.inputTranscription.text) {
+        resetCaptionWatchdog();
+      }
     }
   } catch (err) {
     console.error('[Offscreen] Failed to parse Gemini response:', err, data);
@@ -545,7 +604,13 @@ function scheduleReconnect() {
 }
 
 function reconnectWebSocket() {
-  dbg('reconnectWebSocket called');
+  if (isReconnecting) {
+    dbg('reconnectWebSocket: already in progress, skipping');
+    return;
+  }
+  isReconnecting = true;
+  const reason = new Error().stack?.split('\n')[2]?.trim() || 'unknown';
+  dbg(`reconnectWebSocket called from: ${reason}`);
   if (websocket) {
     websocket.onclose = null;
     websocket.close();
@@ -557,17 +622,103 @@ function reconnectWebSocket() {
   }
   setupComplete = false;
   partialText = '';
+  const t0 = Date.now();
   connectWebSocket().then(() => {
-    dbg('Reconnect successful');
+    dbg(`Reconnect successful (took ${Date.now() - t0}ms), waiting for captions...`);
+    isReconnecting = false;
     reconnectAttempts = 0; // Reset on successful reconnect
   }).catch(err => {
     console.error('[Offscreen] Reconnect failed:', err);
+    isReconnecting = false;
     scheduleReconnect();
   });
 }
 
+// ==================== CAPTION WATCHDOG ====================
+// Gemini Live Translate sessions silently die after ~10 minutes.
+// The WebSocket stays open and audio keeps flowing, but the server
+// stops sending transcriptions. This watchdog detects that state
+// and forces a reconnection.
+
+function startCaptionWatchdog() {
+  stopCaptionWatchdog();
+  lastCaptionTime = Date.now();
+  captionWatchdogTimer = setInterval(() => {
+    if (!isCapturing || !setupComplete || isReconnecting) return;
+    const now = Date.now();
+    const sinceCaption = now - lastCaptionTime;
+    const sinceAudio = now - lastAudioSendTime;
+
+    // Only trigger if:
+    // 1. No captions for CAPTION_WATCHDOG_MS (connection likely dead)
+    // 2. Audio WAS sent recently (within 10s) — so it's not just silence
+    // If no audio is flowing either, the user is just quiet — leave the connection alone.
+    if (sinceCaption > CAPTION_WATCHDOG_MS && sinceAudio < 10000) {
+      console.warn(`[Offscreen] Watchdog: no captions for ${Math.round(sinceCaption/1000)}s but audio flowing, forcing reconnect`);
+      sendStatus('reconnecting', 'Session stale, reconnecting...');
+      reconnectWebSocket();
+    }
+  }, 10000); // Check every 10s
+}
+
+function stopCaptionWatchdog() {
+  if (captionWatchdogTimer) {
+    clearInterval(captionWatchdogTimer);
+    captionWatchdogTimer = null;
+  }
+}
+
+function resetCaptionWatchdog() {
+  lastCaptionTime = Date.now();
+}
+
+// ==================== SESSION ROTATION ====================
+// Proactively rotate the WebSocket session before Gemini kills it.
+// This is the primary mechanism for seamless long-running captions.
+// The watchdog is the safety net for silent failures.
+
+function startSessionRotation() {
+  stopSessionRotation();
+  sessionStartTime = Date.now();
+  sessionRotateTimer = setTimeout(() => {
+    if (!isCapturing || isReconnecting) return;
+    const uptime = Math.round((Date.now() - sessionStartTime) / 1000);
+    console.log(`[Offscreen] Session rotation: session alive for ${uptime}s, rotating proactively`);
+    sendStatus('reconnecting', 'Rotating session...');
+    reconnectWebSocket();
+  }, SESSION_ROTATE_MS);
+}
+
+function scheduleSessionRotation(delayMs) {
+  stopSessionRotation();
+  sessionRotateTimer = setTimeout(() => {
+    if (!isCapturing || isReconnecting) return;
+    console.log('[Offscreen] Scheduled session rotation triggered');
+    sendStatus('reconnecting', 'Rotating session...');
+    reconnectWebSocket();
+  }, delayMs);
+}
+
+function stopSessionRotation() {
+  if (sessionRotateTimer) {
+    clearTimeout(sessionRotateTimer);
+    sessionRotateTimer = null;
+  }
+}
+
+// Parse GoAway timeLeft string to milliseconds.
+// Gemini sends formats like "30s", "2m30s", "5m", "1h30m".
+function parseDuration(str) {
+  if (!str) return 0;
+  if (typeof str === 'number') return str; // Already numeric
+  const match = String(str).match(/(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?/);
+  if (!match) return 0;
+  return (parseInt(match[1] || 0) * 3600 + parseInt(match[2] || 0) * 60 + parseInt(match[3] || 0)) * 1000;
+}
+
 // ==================== HELPERS ====================
 function sendCaption(text, isFinal) {
+  if (text) resetCaptionWatchdog();
   chrome.runtime.sendMessage({
     type: 'CAPTION_UPDATE',
     text,

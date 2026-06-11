@@ -313,6 +313,40 @@ body::-webkit-scrollbar-thumb {
   );
 }
 
+/* ── Display Mode Info ──────────────────────────────────── */
+.display-mode-info {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+
+.display-mode-info.pip-active {
+  border-color: rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.05);
+}
+
+.mode-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.mode-hint-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  margin-top: 3px;
+  line-height: 1.4;
+  transition: color 0.3s ease;
+}
+
+.display-mode-info.pip-active .mode-hint-sub {
+  color: var(--active-start);
+}
+
 /* ── Settings Panel ──────────────────────────────────────── */
 .settings {
   display: flex;

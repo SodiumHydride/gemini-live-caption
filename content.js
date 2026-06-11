@@ -8,7 +8,7 @@
   const STORE_KEY = 'captionLayout';
   const MAX_LINES = 3;
 
-  let shadow, wrap, linesEl, track, placeholder;
+  let shadow, wrap, linesEl, track, placeholder, pipBtn;
   let fadeTimer = null, capturing = false;
   let layout = { x: null, y: null, w: 560 };
   let lineCount = 0;
@@ -59,6 +59,44 @@
     );
     drag.appendChild(svg);
 
+    // PiP button — standalone floating element (not inside drag bar)
+    // Visible during capture, positioned at top-right of subtitle overlay area
+    pipBtn = document.createElement('button');
+    pipBtn.className = 'pip-btn';
+    pipBtn.title = 'Picture-in-Picture';
+    const pipSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    pipSvg.setAttribute('width', '16');
+    pipSvg.setAttribute('height', '16');
+    pipSvg.setAttribute('viewBox', '0 0 24 24');
+    pipSvg.setAttribute('fill', 'none');
+    pipSvg.setAttribute('stroke', 'currentColor');
+    pipSvg.setAttribute('stroke-width', '2');
+    pipSvg.setAttribute('stroke-linecap', 'round');
+    pipSvg.setAttribute('stroke-linejoin', 'round');
+    const rect1 = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect1.setAttribute('x', '2');
+    rect1.setAttribute('y', '3');
+    rect1.setAttribute('width', '20');
+    rect1.setAttribute('height', '14');
+    rect1.setAttribute('rx', '2');
+    pipSvg.appendChild(rect1);
+    const rect2 = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    rect2.setAttribute('x', '11');
+    rect2.setAttribute('y', '9');
+    rect2.setAttribute('width', '9');
+    rect2.setAttribute('height', '6');
+    rect2.setAttribute('rx', '1');
+    rect2.setAttribute('fill', 'currentColor');
+    pipSvg.appendChild(rect2);
+    pipBtn.appendChild(pipSvg);
+    pipBtn.addEventListener('click', e => {
+      e.stopPropagation();
+      togglePiP(pipBtn);
+    });
+    if (!isPiPSupported()) {
+      pipBtn.style.display = 'none';
+    }
+
     // Visible window — fixed height set by JS after first line measurement
     linesEl = document.createElement('div');
     linesEl.className = 'lines';
@@ -81,6 +119,7 @@
     wrap.appendChild(linesEl);
     wrap.appendChild(placeholder);
     wrap.appendChild(resize);
+    wrap.appendChild(pipBtn);
     shadow.appendChild(wrap);
 
     applyPos();
@@ -119,9 +158,28 @@
         height: 16px; cursor: grab; opacity: 0;
         transition: opacity .2s; flex-shrink: 0;
         background: var(--cap-bg);
+        position: relative;
       }
       .w:hover .drag, .w.dragging .drag { opacity: 1; }
       .w.dragging .drag { cursor: grabbing; }
+
+      .pip-btn {
+        position: absolute; bottom: 4px; right: 26px; z-index: 10;
+        width: 28px; height: 28px; padding: 0;
+        background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.1);
+        cursor: pointer; border-radius: 6px;
+        color: rgba(255,255,255,0.5);
+        display: none; align-items: center; justify-content: center;
+        backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+        transition: color .2s, background .2s, transform .15s;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+        pointer-events: auto;
+      }
+      .pip-btn.vis { display: flex; }
+      .pip-btn:hover { color: #fff; background: rgba(30,30,50,0.8); transform: scale(1.1); }
+      .pip-btn:active { transform: scale(0.92); }
+      .pip-btn.active { color: #4fc3f7; border-color: rgba(79,195,247,0.3); }
+      .pip-btn.active:hover { color: #81d4fa; }
 
       .lines {
         overflow: hidden;
@@ -182,11 +240,14 @@
     track.appendChild(el);
     lineCount++;
 
-    // Lock viewport height on first line — prevents container flash
+    // Lock viewport height on first line — prevents container flash.
+    // Wait for browser layout so offsetHeight is accurate.
     if (!viewportLocked) {
-      const lineH = el.offsetHeight;
-      linesEl.style.height = (lineH * MAX_LINES) + 'px';
       viewportLocked = true;
+      requestAnimationFrame(() => {
+        const lineH = el.offsetHeight || parseFloat(getComputedStyle(el).fontSize) * 1.45 || 32;
+        linesEl.style.height = (lineH * MAX_LINES) + 'px';
+      });
     }
 
     if (lineCount > MAX_LINES) {
@@ -382,6 +443,115 @@
     });
   }
 
+  // ==================== DOCUMENT PIP ====================
+  // PiP window is a plain browsing context (inherits host page origin).
+  // It cannot access chrome.* APIs. content.js acts as the bridge:
+  //   service-worker → content.js → pipWindow (via postMessage)
+  //   pipWindow → content.js → service-worker (via postMessage relay)
+
+  let pipWindow = null;
+
+  function isPiPSupported() {
+    return !!window.documentPictureInPicture;
+  }
+
+  async function togglePiP(btn) {
+    if (pipWindow && !pipWindow.closed) {
+      pipWindow.close();
+      return;
+    }
+
+    if (!isPiPSupported()) {
+      console.warn('[Gemini Live Caption] Document PiP not supported');
+      return;
+    }
+
+    try {
+      pipWindow = await window.documentPictureInPicture.requestWindow({
+        width: 800,
+        height: 360,
+      });
+
+      // Fetch pip.html and replace relative URLs with absolute extension URLs.
+      // PiP window inherits host page origin, so relative paths break.
+      const response = await fetch(chrome.runtime.getURL('pip.html'));
+      let html = await response.text();
+      html = html
+        .replace('href="pip.css"', `href="${chrome.runtime.getURL('pip.css')}"`)
+        .replace('src="pip.js"', `src="${chrome.runtime.getURL('pip.js')}"`);
+      pipWindow.document.write(html);
+      pipWindow.document.close();
+
+      // Notify service worker
+      chrome.runtime.sendMessage({ type: 'PIP_OPENED' }).catch(() => {});
+      btn.classList.add('active');
+
+      // Listen for messages FROM PiP window (sent via window.opener.postMessage).
+      // Must listen on `window` (the host page), not on `pipWindow`.
+      function onPiPMessage(event) {
+        if (!event.data || !event.data.type) return;
+        if (event.data.type === 'PIP_CLOSED') {
+          chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});
+          btn.classList.remove('active');
+          pipWindow = null;
+          window.removeEventListener('message', onPiPMessage);
+        } else if (event.data.type === 'PIP_SETTINGS_CHANGED') {
+          // PiP window changed a setting — persist it
+          const { key, value } = event.data;
+          if (key && value !== undefined) {
+            chrome.storage.local.set({ [key]: value }).catch(() => {});
+          }
+        }
+      }
+      window.addEventListener('message', onPiPMessage);
+
+      // PiP window closed by user (browser chrome close button, etc.)
+      pipWindow.addEventListener('pagehide', () => {
+        chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});
+        btn.classList.remove('active');
+        pipWindow = null;
+        window.removeEventListener('message', onPiPMessage);
+      });
+
+      // Replay recent captions into PiP window so it's not empty on open
+      replayBufferToPiP();
+    } catch (err) {
+      console.warn('[Gemini Live Caption] PiP failed:', err);
+      pipWindow = null;
+    }
+  }
+
+  // Caption ring buffer for PiP catch-up
+  const PIP_BUFFER_SIZE = 20;
+  const captionBuffer = [];
+
+  function bufferCaption(text, isFinal) {
+    if (!isFinal) return; // Only buffer finalized captions
+    captionBuffer.push({ text, ts: Date.now() });
+    if (captionBuffer.length > PIP_BUFFER_SIZE) captionBuffer.shift();
+  }
+
+  function replayBufferToPiP() {
+    if (!pipWindow || pipWindow.closed) return;
+    for (const entry of captionBuffer) {
+      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true });
+    }
+  }
+
+  function postToPiP(msg) {
+    if (!pipWindow || pipWindow.closed) return;
+    try {
+      pipWindow.postMessage(msg, '*');
+    } catch (e) {
+      // Window may have navigated or closed
+    }
+  }
+
+  // Relay settings changes to PiP window
+  function relaySettingsToPiP(s) {
+    postToPiP({ type: 'SETTINGS_UPDATE', ...s });
+  }
+
   // ==================== MESSAGES ====================
   let contextInvalidated = false;
 
@@ -408,8 +578,16 @@
           }
         }
         show(msg.text, msg.isFinal);
+        // Show PiP button when captions are flowing
+        if (pipBtn) pipBtn.classList.add('vis');
+        // Relay to PiP window and buffer for catch-up
+        bufferCaption(msg.text, msg.isFinal);
+        postToPiP({ type: 'CAPTION_UPDATE', text: msg.text, isFinal: msg.isFinal });
       } else if (msg.type === 'CLEAR_CAPTIONS') {
         clearCaptions();
+        postToPiP({ type: 'CLEAR_CAPTIONS' });
+        // Hide PiP button when capture stops
+        if (pipBtn) pipBtn.classList.remove('vis');
       }
     } catch (e) {
       if (e.message && e.message.includes('Extension context invalidated')) {
@@ -434,7 +612,10 @@
     const s = {};
     if (changes.fontSize) s.fontSize = changes.fontSize.newValue;
     if (changes.bgOpacity) s.bgOpacity = changes.bgOpacity.newValue;
-    if (Object.keys(s).length) applySettings(s);
+    if (Object.keys(s).length) {
+      applySettings(s);
+      relaySettingsToPiP(s);
+    }
   });
 
   // ==================== AUTO-REPAIR ====================
