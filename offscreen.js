@@ -11,6 +11,7 @@ let websocket = null;
 let isCapturing = false;
 let reconnectTimer = null;
 let heartbeatTimer = null;  // Keeps SW alive via periodic messages
+let wsGeneration = 0;       // Tracks WebSocket connection generation; stopCapture increments it
 let currentSettings = {};
 
 // Session management state
@@ -163,8 +164,9 @@ async function startCapture(streamId, settings) {
 
 function stopCapture() {
   isCapturing = false;
-  sessionResumptionHandle = null;
-  chrome.storage.session.set({ sessionResumptionHandle: null }).catch(() => {});
+  wsGeneration++;  // Invalidate any in-flight WebSocket connections
+  // Do NOT clear sessionResumptionHandle here — AUDIO_LOST triggers a restart
+  // that reads the handle from storage. Clearing it would break session resumption.
 
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
@@ -210,21 +212,24 @@ function stopCapture() {
 let setupComplete = false;
 
 async function connectWebSocket() {
+  const gen = ++wsGeneration;
   return new Promise((resolve, reject) => {
     const apiKey = currentSettings.apiKey;
     const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
 
     dbg('Connecting to Gemini Live Translate...');
     setupComplete = false;
-    websocket = new WebSocket(wsUrl);
+    const ws = new WebSocket(wsUrl);
+    websocket = ws;
 
-    websocket.onopen = () => {
+    ws.onopen = () => {
+      if (gen !== wsGeneration) { ws.close(); return; }
       dbg('WebSocket connected, sending setup...');
       sendSetupMessage();
     };
 
-    websocket.onmessage = (event) => {
-      // Server may send Blob (binary frames) or string — handle both
+    ws.onmessage = (event) => {
+      if (gen !== wsGeneration) return;
       if (event.data instanceof Blob) {
         event.data.text().then((text) => {
           processMessage(text, resolve, reject);
@@ -234,13 +239,15 @@ async function connectWebSocket() {
       }
     };
 
-    websocket.onerror = (error) => {
+    ws.onerror = (error) => {
+      if (gen !== wsGeneration) return;
       console.error('[Offscreen] WebSocket error:', error);
       sendStatus('error', 'WebSocket connection error');
       if (!setupComplete) reject(new Error('WebSocket connection failed'));
     };
 
-    websocket.onclose = (event) => {
+    ws.onclose = (event) => {
+      if (gen !== wsGeneration) return;
       dbg(`WebSocket closed: code=${event.code}, isCapturing: ${isCapturing}`);
       if (isCapturing) {
         sendStatus('reconnecting', 'Connection lost, reconnecting...');
@@ -251,6 +258,7 @@ async function connectWebSocket() {
     };
 
     setTimeout(() => {
+      if (gen !== wsGeneration) return;
       if (!setupComplete) {
         reject(new Error('WebSocket connection timeout'));
       }

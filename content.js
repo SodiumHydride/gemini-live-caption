@@ -12,6 +12,7 @@
   let fadeTimer = null, capturing = false;
   let layout = { x: null, y: null, w: 560 };
   let lineCount = 0;
+  let initGeneration = 0;  // Prevents stale async callbacks from building on wrong shadow
 
   // ==================== INIT ====================
   const FONT_MAP = { small: '2.4vh', medium: '3.2vh', large: '4vh' };
@@ -32,7 +33,9 @@
     host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
     document.documentElement.appendChild(host);
     shadow = host.attachShadow({ mode: 'closed' });
+    const gen = ++initGeneration;
     chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity'], r => {
+      if (gen !== initGeneration) return;  // Stale callback, ignore
       if (r[STORE_KEY]) Object.assign(layout, r[STORE_KEY]);
       build();
       applySettings(r);
@@ -192,7 +195,8 @@
       track.style.transform = `translateY(-${lineH}px)`;
 
       // After animation, remove old line and reset track position
-      track.addEventListener('transitionend', function handler() {
+      track.addEventListener('transitionend', function handler(event) {
+        if (event.propertyName !== 'transform') return;
         track.removeEventListener('transitionend', handler);
         if (track.firstChild && track.firstChild !== el) {
           track.removeChild(track.firstChild);
