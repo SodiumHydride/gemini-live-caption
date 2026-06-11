@@ -14,16 +14,28 @@
   let lineCount = 0;
 
   // ==================== INIT ====================
+  const FONT_MAP = { small: '2.4vh', medium: '3.2vh', large: '4vh' };
+
+  function applySettings(s) {
+    if (!shadow) return;
+    const host = shadow.host;
+    if (s.fontSize) host.style.setProperty('--cap-font-size', FONT_MAP[s.fontSize] ?? FONT_MAP.medium);
+    if (s.bgOpacity !== undefined) host.style.setProperty('--cap-bg', `rgba(0,0,0,${s.bgOpacity})`);
+  }
+
   function init() {
-    if (document.getElementById(HOST_ID)) return;
+    // Clean up any existing overlay (idempotent — safe for re-injection)
+    const existing = document.getElementById(HOST_ID);
+    if (existing) existing.remove();
     const host = document.createElement('div');
     host.id = HOST_ID;
     host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
     document.documentElement.appendChild(host);
     shadow = host.attachShadow({ mode: 'closed' });
-    chrome.storage.local.get([STORE_KEY], r => {
+    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity'], r => {
       if (r[STORE_KEY]) Object.assign(layout, r[STORE_KEY]);
       build();
+      applySettings(r);
     });
   }
 
@@ -58,11 +70,6 @@
     placeholder.className = 'ph';
     placeholder.textContent = 'Gemini Live Caption';
 
-    // Placeholder when idle
-    placeholder = document.createElement('div');
-    placeholder.className = 'ph';
-    placeholder.textContent = 'Gemini Live Caption';
-
     // Resize handle
     const resize = document.createElement('div');
     resize.className = 'rsz';
@@ -86,7 +93,11 @@
 
   function css() {
     return `
-      :host { all: initial !important; }
+      :host {
+        all: initial !important;
+        --cap-font-size: 3.2vh;
+        --cap-bg: rgba(0,0,0,0.78);
+      }
 
       .w {
         position: fixed; pointer-events: auto; z-index: 2147483647;
@@ -100,33 +111,29 @@
       }
       .w.vis { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
-      /* Drag handle */
       .drag {
         display: flex; align-items: center; justify-content: center;
         height: 16px; cursor: grab; opacity: 0;
         transition: opacity .2s; flex-shrink: 0;
-        background: rgba(0,0,0,.78);
+        background: var(--cap-bg);
       }
       .w:hover .drag, .w.dragging .drag { opacity: 1; }
       .w.dragging .drag { cursor: grabbing; }
 
-      /* Visible window — fixed height = MAX_LINES * line-height */
       .lines {
         overflow: hidden;
-        background: rgba(0,0,0,.78);
+        background: var(--cap-bg);
         width: 100%;
       }
 
-      /* Sliding track — moves up by one line-height per new subtitle */
       .track {
         transition: transform .35s cubic-bezier(.16,1,.3,1);
         width: 100%;
       }
 
-      /* Each subtitle line — identical styling */
       .line {
         color: #fff;
-        font-size: 3.2vh; font-weight: 500; line-height: 1.45;
+        font-size: var(--cap-font-size); font-weight: 500; line-height: 1.45;
         padding: .3em 1em;
         text-align: center;
         text-shadow: 0 1px 4px rgba(0,0,0,.9), 0 0 10px rgba(0,0,0,.4);
@@ -136,18 +143,16 @@
         overflow: hidden;
       }
 
-      /* Placeholder when idle */
       .ph {
         color: rgba(255,255,255,.3);
-        font-size: 2.8vh; font-weight: 500; line-height: 1.45;
+        font-size: calc(var(--cap-font-size) * 0.875); font-weight: 500; line-height: 1.45;
         padding: .45em 1em;
         text-align: center;
-        background: rgba(0,0,0,.78);
+        background: var(--cap-bg);
         display: none;
       }
       .ph.show { display: block; }
 
-      /* Resize handle */
       .rsz {
         position: absolute; bottom: 0; right: 0;
         width: 22px; height: 22px; cursor: nwse-resize;
@@ -374,12 +379,58 @@
   }
 
   // ==================== MESSAGES ====================
-  chrome.runtime.onMessage.addListener(msg => {
-    if (msg.type === 'CAPTION_UPDATE') {
-      show(msg.text, msg.isFinal);
-    } else if (msg.type === 'CLEAR_CAPTIONS') {
-      clearCaptions();
+  let contextInvalidated = false;
+
+  function messageHandler(msg) {
+    try {
+      if (msg.type === 'CAPTION_UPDATE') {
+        if (contextInvalidated) {
+          // Extension was reloaded — reinitialize the overlay from scratch.
+          // The new service worker injected us fresh; re-init DOM and layout.
+          console.log('[Gemini Live Caption] Reinitializing after context invalidation');
+          contextInvalidated = false;
+          try {
+            const oldHost = document.getElementById(HOST_ID);
+            if (oldHost) oldHost.remove();
+            shadow = wrap = linesEl = track = placeholder = null;
+            viewportLocked = false;
+            lineCount = 0;
+            currentPartialEl = null;
+            currentPartialText = '';
+            lastFinalized = '';
+            init();
+          } catch (reinitErr) {
+            console.warn('[Gemini Live Caption] Reinit failed:', reinitErr);
+          }
+        }
+        show(msg.text, msg.isFinal);
+      } else if (msg.type === 'CLEAR_CAPTIONS') {
+        clearCaptions();
+      }
+    } catch (e) {
+      if (e.message && e.message.includes('Extension context invalidated')) {
+        console.log('[Gemini Live Caption] Extension context invalidated');
+        contextInvalidated = true;
+        // Do NOT remove the listener — the new service worker's messages
+        // may still route through this handler on some Chrome versions.
+        // The next message that arrives will trigger reinit.
+      }
     }
+  }
+  // Listener dedup: remove previous handler if this script was re-injected.
+  if (window.__geminiCaptionHandler) {
+    chrome.runtime.onMessage.removeListener(window.__geminiCaptionHandler);
+  }
+  window.__geminiCaptionHandler = messageHandler;
+  chrome.runtime.onMessage.addListener(messageHandler);
+
+  // ==================== SETTINGS REAL-TIME SYNC ====================
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    const s = {};
+    if (changes.fontSize) s.fontSize = changes.fontSize.newValue;
+    if (changes.bgOpacity) s.bgOpacity = changes.bgOpacity.newValue;
+    if (Object.keys(s).length) applySettings(s);
   });
 
   // ==================== AUTO-REPAIR ====================

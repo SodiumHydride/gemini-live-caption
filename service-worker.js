@@ -1,13 +1,203 @@
 // service-worker.js — Gemini Live Caption Extension
 // Orchestrates tab capture, offscreen document, and message routing.
+//
+// Architecture:
+// - All state stored in chrome.storage.session (survives SW restart)
+// - Event listeners registered at top level (MV3 requirement)
+// - Single offscreen document for audio processing
+// - State machine: idle → starting → capturing → stopping
 
-// ==================== EVENT LISTENERS (synchronous top-level registration) ====================
+// ==================== STATE MANAGEMENT ====================
+// State structure in chrome.storage.session:
+// {
+//   captureState: 'idle' | 'starting' | 'capturing' | 'stopping',
+//   activeTabId: number | null,
+//   waitingReloadTabId: number | null  // Tab waiting for reload to complete
+// }
+
+// ==================== STARTUP RECOVERY ====================
+// Recover from stuck states when service worker restarts.
+//
+// Recovery strategy for 'capturing' state:
+//   1. Check if the offscreen document still exists (Chrome may have GC'd it)
+//   2. Check lastHeartbeat timestamp — offscreen writes this every 20s
+//   3. If no recent heartbeat, PING the offscreen to see if it responds
+//   4. Only reset to idle if we can confirm the offscreen is truly dead
+//
+// The offscreen document is the stable anchor (full DOM, no idle timeout for
+// USER_MEDIA reason). The service worker is ephemeral. When the SW restarts,
+// the offscreen may still be happily capturing — we must not kill it blindly.
+(async function recoverState() {
+  const { captureState, activeTabId, lastHeartbeat } =
+    await chrome.storage.session.get(['captureState', 'activeTabId', 'lastHeartbeat']);
+
+  if (captureState === 'starting' || captureState === 'stopping') {
+    // Transition states are transient — if the SW died mid-transition,
+    // the operation is incomplete. Clean up and reset.
+    console.log(`[SW] Recovering from stuck state: ${captureState}`);
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    if (contexts.length > 0) {
+      try { await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }); } catch (e) {}
+      await closeOffscreenDocument();
+    }
+    await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
+    await chrome.action.setBadgeText({ text: '' });
+
+  } else if (captureState === 'capturing' && activeTabId) {
+    // Verify the tab still exists
+    let tabAlive = true;
+    try {
+      await chrome.tabs.get(activeTabId);
+    } catch (e) {
+      tabAlive = false;
+    }
+
+    if (!tabAlive) {
+      console.log(`[SW] Active tab ${activeTabId} no longer exists, cleaning up`);
+      try { await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }); } catch (e) {}
+      await closeOffscreenDocument();
+      await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
+      await chrome.action.setBadgeText({ text: '' });
+      return;
+    }
+
+    // Tab is alive — verify the offscreen document is actually working.
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+    if (contexts.length === 0) {
+      // Offscreen document is gone. Clean up.
+      console.log('[SW] Offscreen document missing during recovery, resetting');
+      await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
+      await chrome.action.setBadgeText({ text: '' });
+      return;
+    }
+
+    // Offscreen exists. Check if it's actually alive via heartbeat.
+    const now = Date.now();
+    if (lastHeartbeat && (now - lastHeartbeat) < 30000) {
+      // Heartbeat is fresh (< 30s old) — offscreen is alive and capturing.
+      console.log('[SW] Offscreen alive (heartbeat fresh), capture continues');
+      await chrome.action.setBadgeText({ text: 'ON' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
+      return;
+    }
+
+    // No recent heartbeat. Ping the offscreen directly — it may have just
+    // started and not sent its first heartbeat yet, or the SW restarted
+    // before the first heartbeat arrived.
+    console.log('[SW] No recent heartbeat, pinging offscreen...');
+    try {
+      const pong = await Promise.race([
+        chrome.runtime.sendMessage({ type: 'PING' }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('ping timeout')), 5000)),
+      ]);
+      if (pong && pong.alive) {
+        console.log('[SW] Offscreen responded to PING, capture continues');
+        await chrome.action.setBadgeText({ text: 'ON' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
+        return;
+      }
+    } catch (e) {
+      console.log('[SW] Offscreen ping failed:', e.message);
+    }
+
+    // Offscreen is not responding. Clean up.
+    console.log('[SW] Offscreen appears dead, resetting to idle');
+    await closeOffscreenDocument();
+    await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
+    await chrome.action.setBadgeText({ text: '' });
+  }
+})();
+
+// ==================== EVENT LISTENERS (top-level registration) ====================
 
 // Handle keyboard shortcut
 chrome.commands.onCommand.addListener(async (command) => {
   if (command === 'toggle-capture') {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (tab) await toggleCapture(tab.id);
+  }
+});
+
+// Handle tab activation (switching between tabs)
+chrome.tabs.onActivated.addListener(async (activeInfo) => {
+  const { tabId } = activeInfo;
+  const { activeTabId, captureState } = await chrome.storage.session.get(['activeTabId', 'captureState']);
+
+  // Skip if in transition
+  if (captureState === 'starting' || captureState === 'stopping') {
+    return;
+  }
+
+  // If switching to a different tab while capturing
+  if (captureState === 'capturing' && activeTabId !== tabId) {
+    console.log(`[SW] Tab switched from ${activeTabId} to ${tabId}, migrating capture`);
+    // Clear any pending reload resume — we're switching tabs now
+    await chrome.storage.session.set({ waitingReloadTabId: null });
+    try {
+      await stopCapture();
+    } catch (e) {
+      console.warn('[SW] stopCapture failed during tab switch:', e);
+    }
+    await startCapture(tabId);
+  }
+});
+
+// Handle tab removal
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const { activeTabId, waitingReloadTabId } = await chrome.storage.session.get(['activeTabId', 'waitingReloadTabId']);
+
+  if (tabId === activeTabId) {
+    console.log('[SW] Active tab closed, stopping capture');
+    await stopCapture();
+  }
+
+  // Clean up waiting state if the tab is closed
+  if (tabId === waitingReloadTabId) {
+    await chrome.storage.session.set({ waitingReloadTabId: null });
+  }
+});
+
+// Handle tab navigation
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
+  const { activeTabId, captureState, waitingReloadTabId } = await chrome.storage.session.get([
+    'activeTabId', 'captureState', 'waitingReloadTabId'
+  ]);
+
+  // If the active tab starts loading a new page
+  if (changeInfo.status === 'loading' && tabId === activeTabId && captureState === 'capturing') {
+    console.log(`[SW] Active tab ${tabId} navigating, stopping capture`);
+    await stopCapture();
+    await chrome.storage.session.set({ waitingReloadTabId: tabId });
+  }
+
+  // If the tab finishes loading and was waiting for reload
+  if (changeInfo.status === 'complete' && tabId === waitingReloadTabId) {
+    // Verify this is still the active tab before resuming
+    const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (currentTab && currentTab.id === tabId) {
+      console.log(`[SW] Tab ${tabId} reloaded, resuming capture`);
+      await chrome.storage.session.set({ waitingReloadTabId: null });
+      await startCapture(tabId);
+    } else {
+      console.log(`[SW] Tab ${tabId} reloaded but no longer active, skipping resume`);
+      await chrome.storage.session.set({ waitingReloadTabId: null });
+    }
+  }
+});
+
+// Handle tab ID replacement (pre-render scenarios)
+chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
+  const { activeTabId } = await chrome.storage.session.get('activeTabId');
+  if (removedTabId === activeTabId) {
+    console.log(`[SW] Tab replaced: ${removedTabId} → ${addedTabId}, restarting capture`);
+    await chrome.storage.session.set({ activeTabId: addedTabId });
+    // Restart capture with new tab ID since stream ID is tab-specific
+    try {
+      await stopCapture();
+    } catch (e) {
+      console.warn('[SW] stopCapture failed during tab replace:', e);
+    }
+    await startCapture(addedTabId);
   }
 });
 
@@ -36,7 +226,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'CAPTION_UPDATE') {
-    // Forward from offscreen to content script
     (async () => {
       const { activeTabId } = await chrome.storage.session.get('activeTabId');
       if (activeTabId) {
@@ -47,29 +236,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             isFinal: msg.isFinal,
           });
         } catch (err) {
-          // Content script might not be ready yet
           console.warn('[SW] Failed to send caption to tab:', err.message);
         }
       }
     })();
-    return false; // No response needed
+    return false;
   }
 
   if (msg.type === 'STATUS_UPDATE') {
     (async () => {
       console.log(`[SW] Status: ${msg.status} - ${msg.message}`);
-      if (msg.status === 'error') {
-        await chrome.action.setBadgeText({ text: 'ERR' });
-        await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
-      } else if (msg.status === 'reconnecting') {
-        await chrome.action.setBadgeText({ text: '...' });
-        await chrome.action.setBadgeBackgroundColor({ color: '#FFA500' });
-      } else if (msg.status === 'capturing') {
-        await chrome.action.setBadgeText({ text: 'ON' });
-        await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
-      } else if (msg.status === 'idle') {
-        await chrome.action.setBadgeText({ text: '' });
-      }
+      await updateBadge(msg.status);
     })();
     return false;
   }
@@ -77,7 +254,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'SAVE_SETTINGS') {
     (async () => {
       await chrome.storage.local.set(msg.settings);
-      // Notify offscreen document of settings change
       try {
         await chrome.runtime.sendMessage({ type: 'UPDATE_SETTINGS', settings: msg.settings });
       } catch (e) {
@@ -87,21 +263,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
-});
 
-// Clean up when tab is closed or navigated
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  const { activeTabId } = await chrome.storage.session.get('activeTabId');
-  if (tabId === activeTabId) {
-    console.log('[SW] Active tab closed, stopping capture');
-    await stopCapture();
+  if (msg.type === 'AUDIO_LOST') {
+    (async () => {
+      console.log('[SW] Audio track lost, restarting capture');
+      const { activeTabId, captureState } = await chrome.storage.session.get(['activeTabId', 'captureState']);
+      if (captureState === 'capturing' && activeTabId) {
+        try {
+          await stopCapture();
+        } catch (e) {
+          console.warn('[SW] stopCapture failed during AUDIO_LOST:', e);
+        }
+        // Small delay before restart to let resources clean up
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          await startCapture(activeTabId);
+        } catch (e) {
+          console.error('[SW] Restart capture after AUDIO_LOST failed:', e);
+        }
+      }
+    })();
+    return false;
+  }
+
+  if (msg.type === 'HEARTBEAT') {
+    // Heartbeat from offscreen document — keeps this SW alive (resets 30s idle timer).
+    // The actual lastHeartbeat timestamp is written by offscreen directly to
+    // chrome.storage.session; this handler only exists so the message itself
+    // resets the SW idle clock.
+    return false;
   }
 });
 
 // Handle extension install/update
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log(`[SW] Extension ${details.reason}`);
-  // Initialize default settings
   const existing = await chrome.storage.local.get(['targetLanguage', 'apiKey']);
   if (!existing.targetLanguage) {
     await chrome.storage.local.set({
@@ -111,15 +307,14 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       bgOpacity: 0.75,
     });
   }
-  // Reset capture state
-  await chrome.storage.session.set({ captureState: 'idle', activeTabId: null });
+  await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null });
   await chrome.action.setBadgeText({ text: '' });
 });
 
 // ==================== CORE FUNCTIONS ====================
 
 async function toggleCapture(tabId) {
-  const { captureState = 'idle' } = await chrome.storage.session.get('captureState');
+  const { captureState = 'idle', activeTabId } = await chrome.storage.session.get(['captureState', 'activeTabId']);
 
   // Ignore if in transition
   if (captureState === 'starting' || captureState === 'stopping') {
@@ -130,27 +325,59 @@ async function toggleCapture(tabId) {
   if (captureState === 'idle') {
     await startCapture(tabId);
   } else if (captureState === 'capturing') {
-    await stopCapture();
+    if (activeTabId === tabId) {
+      // Same tab, stop capture
+      await stopCapture();
+    } else {
+      // Different tab, switch capture
+      try {
+        await stopCapture();
+      } catch (e) {
+        console.warn('[SW] stopCapture failed during switch:', e);
+      }
+      await startCapture(tabId);
+    }
   }
 }
 
 async function startCapture(tabId) {
   console.log(`[SW] Starting capture for tab ${tabId}`);
+
+  // Check if the tab is a Chrome internal page
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const url = tab.url || tab.pendingUrl || '';
+    console.log(`[SW] Tab URL: ${url}`);
+
+    if (!url || url.startsWith('chrome://') || url.startsWith('chrome-extension://') ||
+        url.startsWith('chrome-web-store://') || url.startsWith('edge://') ||
+        url.startsWith('about:') || url.startsWith('brave://') ||
+        url.startsWith('vivaldi://') || url.startsWith('opera://')) {
+      console.warn(`[SW] Cannot capture internal page: ${url}`);
+      await chrome.storage.session.set({ captureState: 'idle', activeTabId: null });
+      await chrome.action.setBadgeText({ text: 'ERR' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
+      throw new Error('Cannot capture Chrome internal pages. Please switch to a regular webpage.');
+    }
+  } catch (e) {
+    if (e.message.includes('Cannot capture')) throw e;
+    console.warn('[SW] Failed to get tab info, proceeding anyway:', e);
+  }
+
   await chrome.storage.session.set({ captureState: 'starting', activeTabId: tabId });
   await chrome.action.setBadgeText({ text: '...' });
   await chrome.action.setBadgeBackgroundColor({ color: '#FFA500' });
 
+  // Ensure the content script is alive in the target tab.
+  // After extension reload, old content scripts become invalid ("Extension context
+  // invalidated") and can't receive messages. We must inject a fresh one.
+  await ensureContentScript(tabId);
+
   try {
-    // 1. Get media stream ID for the tab
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-
-    // 2. Read settings (offscreen can't access chrome.storage)
     const settings = await chrome.storage.local.get(['apiKey', 'targetLanguage']);
-
-    // 3. Ensure offscreen document exists
     await ensureOffscreenDocument();
 
-    // 4. Tell offscreen document to start capture with settings
     const response = await chrome.runtime.sendMessage({
       type: 'START_CAPTURE',
       streamId,
@@ -182,13 +409,11 @@ async function stopCapture() {
   await chrome.storage.session.set({ captureState: 'stopping' });
 
   try {
-    // Tell offscreen to stop
     await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' });
   } catch (e) {
     // Offscreen might already be gone
   }
 
-  // Send clear to content script
   const { activeTabId } = await chrome.storage.session.get('activeTabId');
   if (activeTabId) {
     try {
@@ -198,12 +423,27 @@ async function stopCapture() {
     }
   }
 
-  // Clean up offscreen document
   await closeOffscreenDocument();
-
-  await chrome.storage.session.set({ captureState: 'idle', activeTabId: null });
+  await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, lastHeartbeat: null });
   await chrome.action.setBadgeText({ text: '' });
   console.log('[SW] Capture stopped');
+}
+
+// ==================== HELPER FUNCTIONS ====================
+
+async function updateBadge(status) {
+  if (status === 'error') {
+    await chrome.action.setBadgeText({ text: 'ERR' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
+  } else if (status === 'reconnecting') {
+    await chrome.action.setBadgeText({ text: '...' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#FFA500' });
+  } else if (status === 'capturing') {
+    await chrome.action.setBadgeText({ text: 'ON' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
+  } else if (status === 'idle') {
+    await chrome.action.setBadgeText({ text: '' });
+  }
 }
 
 // ==================== OFFSCREEN DOCUMENT MANAGEMENT ====================
@@ -239,6 +479,21 @@ async function closeOffscreenDocument() {
     }
   } catch (e) {
     console.warn('[SW] Error closing offscreen document:', e);
+  }
+}
+
+async function ensureContentScript(tabId) {
+  // Always inject. content.js's init() is idempotent — if the host element
+  // already exists it returns immediately. A fresh injection guarantees the
+  // message listener is wired to the current extension context, not a stale one.
+  console.log('[SW] Ensuring content script in tab', tabId);
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content.js'],
+    });
+  } catch (e) {
+    console.warn('[SW] Content script injection:', e.message);
   }
 }
 

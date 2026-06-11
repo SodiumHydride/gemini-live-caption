@@ -16,6 +16,7 @@ let workletNode = null;
 let websocket = null;
 let isCapturing = false;
 let reconnectTimer = null;
+let heartbeatTimer = null;  // Keeps SW alive via periodic messages
 let currentSettings = {};
 
 // Session management state
@@ -53,6 +54,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ success: true });
     return true;
   }
+
+  if (msg.type === 'PING') {
+    // Liveness check from service worker (used by recoverState).
+    sendResponse({ alive: isCapturing });
+    return true;
+  }
 });
 
 // ==================== AUDIO CAPTURE ====================
@@ -72,8 +79,15 @@ async function startCapture(streamId, settings) {
   }
 
   // Reset session state
-  sessionResumptionHandle = null;
   reconnectAttempts = 0;
+
+  // Restore session resumption handle from persistent storage (survives offscreen重建)
+  try {
+    const stored = await chrome.storage.session.get('sessionResumptionHandle');
+    sessionResumptionHandle = stored.sessionResumptionHandle ?? null;
+  } catch {
+    sessionResumptionHandle = null;
+  }
 
   // 1. Get the media stream from the tab
   mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -85,8 +99,10 @@ async function startCapture(streamId, settings) {
     },
   });
 
-  // 2. Create AudioContext at 16kHz (Gemini's native input rate)
-  audioContext = new AudioContext({ sampleRate: 16000 });
+  // 2. Create AudioContext at native sample rate (no resampling for playback)
+  const inputSampleRate = mediaStream.getAudioTracks()[0]?.getSettings()?.sampleRate || 48000;
+  console.log(`[Offscreen] Input audio sample rate: ${inputSampleRate}Hz`);
+  audioContext = new AudioContext({ sampleRate: inputSampleRate });
   const source = audioContext.createMediaStreamSource(mediaStream);
 
   // 3. Keep audio playing through speakers
@@ -105,16 +121,61 @@ async function startCapture(streamId, settings) {
     }
   };
 
-  // 6. Connect to Gemini Live Translate API
+  // 6. Monitor audio stream — restart if tracks end (e.g. another tab steals audio focus)
+  for (const track of mediaStream.getAudioTracks()) {
+    track.onended = () => {
+      console.warn('[SW] Audio track ended unexpectedly');
+      if (isCapturing) {
+        sendStatus('reconnecting', 'Audio lost, reconnecting...');
+        stopCapture();
+        // Notify service worker to restart
+        chrome.runtime.sendMessage({ type: 'AUDIO_LOST' }).catch(() => {});
+      }
+    };
+  }
+
+  // 7. Monitor AudioContext — resume if suspended by Chrome
+  if (audioContext.state === 'suspended') {
+    console.log('[Offscreen] AudioContext suspended, resuming...');
+    await audioContext.resume();
+  }
+  audioContext.onstatechange = () => {
+    if (!audioContext) return;
+    console.log(`[Offscreen] AudioContext state: ${audioContext.state}`);
+    if (audioContext.state === 'suspended' && isCapturing) {
+      audioContext.resume().catch(() => {});
+    }
+  };
+
+  // 8. Connect to Gemini Live Translate API
   await connectWebSocket();
 
   isCapturing = true;
   sendStatus('capturing', 'Live caption active');
+
+  // Start heartbeat to keep the service worker alive (SW idle timeout = 30s).
+  // Also writes lastHeartbeat to chrome.storage.session so recoverState() can
+  // verify the offscreen is actually alive after a SW restart.
+  heartbeatTimer = setInterval(() => {
+    if (!isCapturing) return;
+    chrome.runtime.sendMessage({ type: 'HEARTBEAT' }).catch(() => {});
+    chrome.storage?.session?.set({ lastHeartbeat: Date.now() }).catch(() => {});
+  }, 20000);
+  // Write initial heartbeat immediately
+  chrome.storage?.session?.set({ lastHeartbeat: Date.now() }).catch(() => {});
+
   console.log('[Offscreen] Capture started successfully');
 }
 
 function stopCapture() {
   isCapturing = false;
+  sessionResumptionHandle = null;
+  chrome.storage.session.set({ sessionResumptionHandle: null }).catch(() => {});
+
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
 
   if (gapFlushTimer) {
     clearTimeout(gapFlushTimer);
@@ -186,10 +247,12 @@ async function connectWebSocket() {
     };
 
     websocket.onclose = (event) => {
-      console.log(`[Offscreen] WebSocket closed: code=${event.code}, reason=${event.reason}`);
+      console.log(`[Offscreen] WebSocket closed: code=${event.code}, reason=${event.reason}, isCapturing: ${isCapturing}`);
       if (isCapturing) {
         sendStatus('reconnecting', 'Connection lost, reconnecting...');
         scheduleReconnect();
+      } else {
+        console.log('[Offscreen] WebSocket closed but isCapturing is false, not reconnecting');
       }
     };
 
@@ -231,9 +294,10 @@ function sendSetupMessage() {
   // Setup format for gemini-3.5-live-translate-preview
   // See: https://ai.google.dev/gemini-api/docs/live-api/live-translate
   //
-  // CRITICAL: transcription configs go at SETUP level, NOT inside generationConfig.
-  // Official docs show them inside generationConfig, but translate model rejects that.
-  // sessionResumption: seamless reconnection on GoAway.
+  // CRITICAL: transcription configs and contextWindowCompression go at SETUP level,
+  // NOT inside generationConfig. Official docs show them inside generationConfig,
+  // but the live-translate model rejects that.
+  // sessionResumption: seamless reconnection on GoAway (token valid 2 hours).
   const setupMsg = {
     setup: {
       model: 'models/gemini-3.5-live-translate-preview',
@@ -246,7 +310,10 @@ function sendSetupMessage() {
       },
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      // Session resumption for seamless reconnection
+      contextWindowCompression: {
+        slidingWindow: {},
+      },
+      // Session resumption for seamless reconnection across WebSocket resets
       ...(sessionResumptionHandle ? {
         sessionResumption: {
           handle: sessionResumptionHandle,
@@ -331,6 +398,7 @@ function handleGeminiResponse(data) {
       const update = msg.sessionResumptionUpdate;
       if (update.resumable && update.newHandle) {
         sessionResumptionHandle = update.newHandle;
+        chrome.storage.session.set({ sessionResumptionHandle: update.newHandle }).catch(() => {});
         console.log('[Offscreen] Session resumption handle saved');
       }
     }
@@ -338,9 +406,12 @@ function handleGeminiResponse(data) {
     // GoAway — server is about to disconnect, proactively reconnect
     if (msg.goAway) {
       console.warn(`[Offscreen] GoAway received, time left: ${msg.goAway.timeLeft}`);
+      console.log(`[Offscreen] isCapturing: ${isCapturing}, websocket state: ${websocket?.readyState}`);
       if (isCapturing) {
         sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
         reconnectWebSocket();
+      } else {
+        console.warn('[Offscreen] GoAway received but isCapturing is false, not reconnecting');
       }
       return;
     }
@@ -456,6 +527,7 @@ function handleGeminiResponse(data) {
 
 // ==================== RECONNECTION ====================
 function scheduleReconnect() {
+  console.log(`[Offscreen] scheduleReconnect called, reconnectAttempts: ${reconnectAttempts}, reconnectTimer: ${reconnectTimer}`);
   if (reconnectTimer) return;
 
   if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
@@ -472,10 +544,12 @@ function scheduleReconnect() {
 
   reconnectTimer = setTimeout(async () => {
     reconnectTimer = null;
+    console.log(`[Offscreen] Reconnect timer fired, isCapturing: ${isCapturing}`);
     if (!isCapturing) return;
     try {
       await connectWebSocket();
       console.log('[Offscreen] Reconnected successfully');
+      reconnectAttempts = 0; // Reset on successful reconnect
     } catch (err) {
       console.error('[Offscreen] Reconnect failed:', err);
       scheduleReconnect();
@@ -484,6 +558,7 @@ function scheduleReconnect() {
 }
 
 function reconnectWebSocket() {
+  console.log('[Offscreen] reconnectWebSocket called');
   if (websocket) {
     websocket.onclose = null;
     websocket.close();
@@ -495,7 +570,10 @@ function reconnectWebSocket() {
   }
   setupComplete = false;
   partialText = '';
-  connectWebSocket().catch(err => {
+  connectWebSocket().then(() => {
+    console.log('[Offscreen] Reconnect successful');
+    reconnectAttempts = 0; // Reset on successful reconnect
+  }).catch(err => {
     console.error('[Offscreen] Reconnect failed:', err);
     scheduleReconnect();
   });
