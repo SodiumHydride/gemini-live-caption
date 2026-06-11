@@ -51,8 +51,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       workletNode.port.postMessage({ noiseGate: msg.settings.noiseGate });
     }
 
-    // VAD or language change requires WebSocket reconnect with new setup
-    if (msg.settings.vadSensitivity || msg.settings.targetLanguage) {
+    // Language change requires WebSocket reconnect with new setup
+    if (msg.settings.targetLanguage) {
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         reconnectWebSocket();
       }
@@ -80,7 +80,6 @@ async function startCapture(streamId, settings) {
     targetLanguage: settings.targetLanguage || 'zh-Hans',
     audioGain: settings.audioGain ?? 1.0,
     noiseGate: settings.noiseGate ?? 0,
-    vadSensitivity: settings.vadSensitivity ?? 'HIGH',
   };
 
   if (!currentSettings.apiKey) {
@@ -320,13 +319,6 @@ function sendSetupMessage() {
       },
       inputAudioTranscription: {},
       outputAudioTranscription: {},
-      realtimeInputConfig: {
-        automaticActivityDetection: {
-          startOfSpeechSensitivity: currentSettings.vadSensitivity || 'HIGH',
-          endOfSpeechSensitivity: currentSettings.vadSensitivity === 'LOW' ? 'LOW' : 'HIGH',
-          silenceDurationMs: currentSettings.vadSensitivity === 'LOW' ? 800 : 500,
-        },
-      },
     },
   };
 

@@ -14,13 +14,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   const opacityValue = document.getElementById('opacityValue');
   const audioGainSlider = document.getElementById('audioGain');
   const gainValue = document.getElementById('gainValue');
-  const vadControl = document.getElementById('vadControl');
   const noiseGateSlider = document.getElementById('noiseGate');
   const gateValue = document.getElementById('gateValue');
 
   // ==================== LOAD SETTINGS ====================
   const settings = await chrome.storage.local.get([
-    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'vadSensitivity', 'noiseGate'
+    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'noiseGate'
   ]);
 
   if (settings.apiKey) apiKeyInput.value = settings.apiKey;
@@ -39,11 +38,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     const val = Math.round(settings.audioGain * 10);
     audioGainSlider.value = val;
     gainValue.textContent = `${(val / 10).toFixed(1)}x`;
-  }
-  if (settings.vadSensitivity) {
-    vadControl.querySelectorAll('.seg-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.value === settings.vadSensitivity);
-    });
   }
   if (settings.noiseGate !== undefined) {
     const val = Math.round(settings.noiseGate * 1000);
@@ -173,14 +167,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   audioGainSlider.addEventListener('change', () => {
     saveSettings({ audioGain: parseInt(audioGainSlider.value) / 10 });
-  });
-
-  vadControl.addEventListener('click', (e) => {
-    const btn = e.target.closest('.seg-btn');
-    if (!btn) return;
-    vadControl.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    saveSettings({ vadSensitivity: btn.dataset.value });
   });
 
   noiseGateSlider.addEventListener('input', () => {
