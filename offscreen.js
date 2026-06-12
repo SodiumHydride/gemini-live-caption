@@ -765,10 +765,6 @@ function handleGeminiResponse(msg) {
       // Input transcription — connection is alive, reset watchdog
       if (sc.inputTranscription && sc.inputTranscription.text) {
         resetCaptionWatchdog();
-        // Buffer input transcription for bilingual mode
-        if (bilingualMode) {
-          partialInputText += sc.inputTranscription.text;
-        }
       }
     }
 }
@@ -823,7 +819,8 @@ function reconnectWebSocket() {
     gapFlushTimer = null;
   }
   setupComplete = false;
-  partialText = '';
+  outputProcessor.reset();
+  inputProcessor.reset();
   const t0 = Date.now();
   connectWebSocket().then(() => {
     dbg(`Reconnect successful (took ${Date.now() - t0}ms), waiting for captions...`);
@@ -1059,8 +1056,9 @@ function sendCaption(text, isFinal, originalText) {
     isFinal,
   };
   if (bilingualMode) {
-    // Get original text from input processor (cumulative format)
-    msg.original = originalText || inputProcessor.flush();
+    // Get original text from input processor
+    // Only flush on final to preserve stability buffer during live preview
+    msg.original = originalText || (isFinal ? inputProcessor.flush() : inputProcessor.getFullText());
   }
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
