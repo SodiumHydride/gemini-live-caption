@@ -14,6 +14,8 @@
   const FADE_TIMEOUT = 15000;
 
   let track, linesEl, placeholder, settingsPanel;
+  let historyPanel, historyScroll, historyOverlay;
+  let historyVisible = false;
   let maxLines = 3;
   let fadeTimer = null;
   let capturing = false;
@@ -25,12 +27,19 @@
   let lineCount = 0;
   let viewportLocked = false;
 
+  // Caption history buffer
+  const CAPTION_HISTORY_SIZE = 500;
+  const captionHistory = [];
+
   // ==================== INIT ====================
   document.addEventListener('DOMContentLoaded', () => {
     track = document.getElementById('track');
     linesEl = document.getElementById('lines');
     placeholder = document.getElementById('placeholder');
     settingsPanel = document.getElementById('settings-panel');
+    historyPanel = document.getElementById('history-panel');
+    historyScroll = document.getElementById('history-scroll');
+    historyOverlay = document.getElementById('history-overlay');
 
     // Close button
     document.getElementById('close-btn').addEventListener('click', () => {
@@ -86,6 +95,34 @@
 
     // Before unload
     window.addEventListener('beforeunload', notifyClosed);
+
+    // Double-click to toggle history panel
+    linesEl.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleHistory();
+    });
+
+    // History panel close button
+    const historyClose = document.getElementById('history-close');
+    if (historyClose) {
+      historyClose.addEventListener('click', (e) => {
+        e.stopPropagation();
+        hideHistory();
+      });
+    }
+
+    // Click overlay to close history
+    if (historyOverlay) {
+      historyOverlay.addEventListener('click', () => hideHistory());
+    }
+
+    // ESC key to close history
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && historyVisible) {
+        hideHistory();
+      }
+    });
 
     // Listen for messages from content.js
     window.addEventListener('message', (event) => {
@@ -251,6 +288,16 @@
       currentPartialEl = null;
       currentPartialText = '';
       addLine(text, originalText);
+
+      // Add to history buffer
+      const ts = Date.now();
+      captionHistory.push({ text, ts });
+      if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
+
+      // If history panel is visible, append new entry
+      if (historyVisible) {
+        appendHistoryEntry(text, ts);
+      }
     } else {
       if (currentPartialEl && currentPartialEl.parentNode === track) {
         // Update translated text
@@ -321,6 +368,81 @@
     placeholder.classList.add('show');
     currentPartialEl = null;
     currentPartialText = '';
+  }
+
+  // ==================== HISTORY PANEL ====================
+  function toggleHistory() {
+    if (historyVisible) {
+      hideHistory();
+    } else {
+      showHistory();
+    }
+  }
+
+  function showHistory() {
+    if (!historyPanel || !historyScroll) return;
+    historyVisible = true;
+
+    // Populate history
+    renderHistory();
+
+    // Show panel with animation
+    historyPanel.classList.add('visible');
+    if (historyOverlay) historyOverlay.classList.add('visible');
+
+    // Scroll to bottom
+    requestAnimationFrame(() => {
+      historyScroll.scrollTop = historyScroll.scrollHeight;
+    });
+
+    // Pause fade timer while viewing history
+    clearTimeout(fadeTimer);
+  }
+
+  function hideHistory() {
+    if (!historyPanel) return;
+    historyVisible = false;
+    historyPanel.classList.remove('visible');
+    if (historyOverlay) historyOverlay.classList.remove('visible');
+  }
+
+  function renderHistory() {
+    if (!historyScroll) return;
+
+    // Clear existing content
+    while (historyScroll.firstChild) {
+      historyScroll.removeChild(historyScroll.firstChild);
+    }
+
+    // Render all history entries
+    for (const entry of captionHistory) {
+      appendHistoryEntry(entry.text, entry.ts);
+    }
+  }
+
+  function appendHistoryEntry(text, ts) {
+    if (!historyScroll) return;
+
+    const el = document.createElement('div');
+    el.className = 'history-entry';
+
+    const time = document.createElement('span');
+    time.className = 'history-time';
+    const d = new Date(ts);
+    time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+    const textEl = document.createElement('span');
+    textEl.className = 'history-text';
+    textEl.textContent = text;
+
+    el.appendChild(time);
+    el.appendChild(textEl);
+    historyScroll.appendChild(el);
+
+    // Auto-scroll to bottom
+    requestAnimationFrame(() => {
+      historyScroll.scrollTop = historyScroll.scrollHeight;
+    });
   }
 
   // ==================== LIFECYCLE ====================

@@ -9,6 +9,8 @@
   const MAX_LINES = 3;
 
   let shadow, wrap, linesEl, track, placeholder, pipBtn, statusIndicator;
+  let historyPanel, historyScroll, historyOverlay;
+  let historyVisible = false;
   let fadeTimer = null, capturing = false;
   let layout = { x: null, y: null, w: 560 };
   let lineCount = 0;
@@ -39,6 +41,13 @@
       if (r[STORE_KEY]) Object.assign(layout, r[STORE_KEY]);
       build();
       applySettings(r);
+    });
+
+    // ESC key to close history panel
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && historyVisible) {
+        hideHistory();
+      }
     });
   }
 
@@ -131,6 +140,43 @@
     wrap.appendChild(statusIndicator);
     wrap.appendChild(resize);
     wrap.appendChild(pipBtn);
+
+    // Transcript history panel (hidden by default, shown on double-click)
+    historyPanel = document.createElement('div');
+    historyPanel.className = 'history-panel';
+    const historyHeader = document.createElement('div');
+    historyHeader.className = 'history-header';
+    const historyTitle = document.createElement('span');
+    historyTitle.className = 'history-title';
+    historyTitle.textContent = 'Transcript';
+    const historyClose = document.createElement('button');
+    historyClose.className = 'history-close';
+    historyClose.textContent = '×';
+    historyClose.addEventListener('click', (e) => {
+      e.stopPropagation();
+      hideHistory();
+    });
+    historyHeader.appendChild(historyTitle);
+    historyHeader.appendChild(historyClose);
+    historyScroll = document.createElement('div');
+    historyScroll.className = 'history-scroll';
+    historyPanel.appendChild(historyHeader);
+    historyPanel.appendChild(historyScroll);
+    wrap.appendChild(historyPanel);
+
+    // Double-click to toggle history panel
+    linesEl.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleHistory();
+    });
+
+    // Click outside history panel to close
+    historyOverlay = document.createElement('div');
+    historyOverlay.className = 'history-overlay';
+    historyOverlay.addEventListener('click', () => hideHistory());
+    wrap.appendChild(historyOverlay);
+
     shadow.appendChild(wrap);
 
     applyPos();
@@ -268,6 +314,137 @@
         border-radius: 0 0 3px 0;
       }
       .w:hover .rsz { opacity: 1; }
+
+      /* History Panel */
+      .history-overlay {
+        display: none;
+        position: absolute;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.3);
+        z-index: 5;
+        pointer-events: auto;
+      }
+      .history-overlay.visible {
+        display: block;
+      }
+
+      .history-panel {
+        display: none;
+        position: absolute;
+        inset: 0;
+        z-index: 10;
+        background: rgba(15, 15, 25, 0.95);
+        backdrop-filter: blur(20px) saturate(1.2);
+        -webkit-backdrop-filter: blur(20px) saturate(1.2);
+        border-radius: 12px;
+        overflow: hidden;
+        pointer-events: auto;
+        flex-direction: column;
+        animation: historySlideIn 0.25s var(--ease-out-expo);
+      }
+      .history-panel.visible {
+        display: flex;
+      }
+
+      @keyframes historySlideIn {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .history-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 14px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+        flex-shrink: 0;
+      }
+
+      .history-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.9);
+        letter-spacing: 0.02em;
+      }
+
+      .history-close {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        background: rgba(255, 255, 255, 0.08);
+        border: none;
+        border-radius: 6px;
+        color: rgba(255, 255, 255, 0.6);
+        font-size: 16px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+      }
+      .history-close:hover {
+        background: rgba(255, 255, 255, 0.15);
+        color: rgba(255, 255, 255, 0.9);
+      }
+
+      .history-scroll {
+        flex: 1;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding: 8px 0;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
+      }
+      .history-scroll::-webkit-scrollbar {
+        width: 6px;
+      }
+      .history-scroll::-webkit-scrollbar-track {
+        background: transparent;
+      }
+      .history-scroll::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 3px;
+      }
+      .history-scroll::-webkit-scrollbar-thumb:hover {
+        background: rgba(255, 255, 255, 0.25);
+      }
+
+      .history-entry {
+        display: flex;
+        gap: 10px;
+        padding: 6px 14px;
+        transition: background 0.15s ease;
+      }
+      .history-entry:hover {
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .history-time {
+        flex-shrink: 0;
+        font-size: 11px;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.35);
+        font-variant-numeric: tabular-nums;
+        min-width: 55px;
+      }
+
+      .history-text {
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.85);
+        line-height: 1.5;
+        word-break: break-word;
+      }
+
+      /* Hint for double-click */
+      .lines {
+        cursor: pointer;
+      }
     `;
   }
 
@@ -411,6 +588,98 @@
         }, 300);
       }
     }, 12000);
+  }
+
+  // ==================== HISTORY PANEL ====================
+  function toggleHistory() {
+    if (historyVisible) {
+      hideHistory();
+    } else {
+      showHistory();
+    }
+  }
+
+  function showHistory() {
+    if (!historyPanel || !historyScroll) return;
+    historyVisible = true;
+
+    // Populate history
+    renderHistory();
+
+    // Show panel with animation
+    historyPanel.classList.add('visible');
+    historyOverlay.classList.add('visible');
+
+    // Scroll to bottom
+    requestAnimationFrame(() => {
+      historyScroll.scrollTop = historyScroll.scrollHeight;
+    });
+
+    // Pause fade timer while viewing history
+    clearTimeout(fadeTimer);
+  }
+
+  function hideHistory() {
+    if (!historyPanel) return;
+    historyVisible = false;
+    historyPanel.classList.remove('visible');
+    historyOverlay.classList.remove('visible');
+  }
+
+  function renderHistory() {
+    if (!historyScroll) return;
+
+    // Clear existing content
+    while (historyScroll.firstChild) {
+      historyScroll.removeChild(historyScroll.firstChild);
+    }
+
+    // Render all history entries
+    const entries = getCaptionHistory();
+    for (const entry of entries) {
+      const el = document.createElement('div');
+      el.className = 'history-entry';
+
+      // Timestamp
+      const time = document.createElement('span');
+      time.className = 'history-time';
+      const d = new Date(entry.ts);
+      time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+      // Text
+      const text = document.createElement('span');
+      text.className = 'history-text';
+      text.textContent = entry.text;
+
+      el.appendChild(time);
+      el.appendChild(text);
+      historyScroll.appendChild(el);
+    }
+  }
+
+  function appendToHistory(text, ts) {
+    if (!historyScroll || !historyVisible) return;
+
+    const el = document.createElement('div');
+    el.className = 'history-entry';
+
+    const time = document.createElement('span');
+    time.className = 'history-time';
+    const d = new Date(ts);
+    time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+    const textEl = document.createElement('span');
+    textEl.className = 'history-text';
+    textEl.textContent = text;
+
+    el.appendChild(time);
+    el.appendChild(textEl);
+    historyScroll.appendChild(el);
+
+    // Auto-scroll to bottom
+    requestAnimationFrame(() => {
+      historyScroll.scrollTop = historyScroll.scrollHeight;
+    });
   }
 
   // ==================== CLEAR ====================
@@ -714,8 +983,14 @@
   function bufferCaption(text, isFinal) {
     if (!isFinal) return; // Only buffer finalized captions
     if (!sessionStartTime) sessionStartTime = Date.now();
-    captionHistory.push({ text, ts: Date.now() });
+    const ts = Date.now();
+    captionHistory.push({ text, ts });
     if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
+
+    // If history panel is visible, append new entry
+    if (historyVisible) {
+      appendToHistory(text, ts);
+    }
   }
 
   function getCaptionHistory() {
