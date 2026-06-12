@@ -15,6 +15,7 @@
   let layout = { x: null, y: null, w: 560 };
   let lineCount = 0;
   let initGeneration = 0;  // Prevents stale async callbacks from building on wrong shadow
+  let listenerController = null;  // AbortController for document-level listeners
 
   // ==================== INIT ====================
   const FONT_MAP = { small: '2.4vh', medium: '3.2vh', large: '4vh' };
@@ -30,6 +31,14 @@
     // Clean up any existing overlay (idempotent — safe for re-injection)
     const existing = document.getElementById(HOST_ID);
     if (existing) existing.remove();
+
+    // Abort previous document-level listeners to prevent accumulation
+    if (listenerController) {
+      listenerController.abort();
+    }
+    listenerController = new AbortController();
+    const signal = listenerController.signal;
+
     const host = document.createElement('div');
     host.id = HOST_ID;
     host.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;pointer-events:none;';
@@ -43,12 +52,12 @@
       applySettings(r);
     });
 
-    // ESC key to close history panel
+    // ESC key to close history panel (using AbortController for cleanup)
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && historyVisible) {
         hideHistory();
       }
-    });
+    }, { signal });
   }
 
   function build() {
@@ -435,6 +444,18 @@
         min-width: 55px;
       }
 
+      .history-content {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .history-original {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.45);
+        line-height: 1.4;
+        margin-bottom: 2px;
+      }
+
       .history-text {
         font-size: 13px;
         color: rgba(255, 255, 255, 0.85);
@@ -625,6 +646,34 @@
     historyVisible = false;
     historyPanel.classList.remove('visible');
     historyOverlay.classList.remove('visible');
+
+    // Restart fade timer after closing history panel
+    if (capturing) {
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        if (capturing) {
+          capturing = false;
+          for (const child of Array.from(track.children)) {
+            child.style.opacity = '0';
+            child.style.maxHeight = '0';
+            child.style.padding = '0 1em';
+          }
+          setTimeout(() => {
+            if (!capturing) {
+              while (track.firstChild) track.removeChild(track.firstChild);
+              lineCount = 0;
+              viewportLocked = false;
+              linesEl.style.height = '';
+              track.style.transform = 'translateY(0)';
+              linesEl.style.display = 'none';
+              placeholder.classList.add('show');
+              currentPartialEl = null;
+              currentPartialText = '';
+            }
+          }, 300);
+        }
+      }, 12000);
+    }
   }
 
   function renderHistory() {
@@ -647,18 +696,29 @@
       const d = new Date(entry.ts);
       time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 
-      // Text
-      const text = document.createElement('span');
-      text.className = 'history-text';
-      text.textContent = entry.text;
+      // Content (original + translated)
+      const contentEl = document.createElement('div');
+      contentEl.className = 'history-content';
+
+      if (entry.original) {
+        const origEl = document.createElement('div');
+        origEl.className = 'history-original';
+        origEl.textContent = entry.original;
+        contentEl.appendChild(origEl);
+      }
+
+      const textEl = document.createElement('div');
+      textEl.className = 'history-text';
+      textEl.textContent = entry.text;
+      contentEl.appendChild(textEl);
 
       el.appendChild(time);
-      el.appendChild(text);
+      el.appendChild(contentEl);
       historyScroll.appendChild(el);
     }
   }
 
-  function appendToHistory(text, ts) {
+  function appendToHistory(text, ts, originalText) {
     if (!historyScroll || !historyVisible) return;
 
     const el = document.createElement('div');
@@ -669,18 +729,35 @@
     const d = new Date(ts);
     time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 
-    const textEl = document.createElement('span');
+    const contentEl = document.createElement('div');
+    contentEl.className = 'history-content';
+
+    if (originalText) {
+      const origEl = document.createElement('div');
+      origEl.className = 'history-original';
+      origEl.textContent = originalText;
+      contentEl.appendChild(origEl);
+    }
+
+    const textEl = document.createElement('div');
     textEl.className = 'history-text';
     textEl.textContent = text;
+    contentEl.appendChild(textEl);
 
     el.appendChild(time);
-    el.appendChild(textEl);
+    el.appendChild(contentEl);
     historyScroll.appendChild(el);
 
-    // Auto-scroll to bottom
-    requestAnimationFrame(() => {
-      historyScroll.scrollTop = historyScroll.scrollHeight;
-    });
+    // Near-Bottom Detection: only auto-scroll if user is already at bottom
+    const threshold = 80;
+    const { scrollHeight, scrollTop, clientHeight } = historyScroll;
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < threshold;
+
+    if (isNearBottom) {
+      requestAnimationFrame(() => {
+        historyScroll.scrollTop = historyScroll.scrollHeight;
+      });
+    }
   }
 
   // ==================== CLEAR ====================
@@ -981,16 +1058,16 @@
   // PiP buffer is a subset of history (most recent)
   const PIP_BUFFER_SIZE = 20;
 
-  function bufferCaption(text, isFinal) {
+  function bufferCaption(text, isFinal, originalText) {
     if (!isFinal) return; // Only buffer finalized captions
     if (!sessionStartTime) sessionStartTime = Date.now();
     const ts = Date.now();
-    captionHistory.push({ text, ts });
+    captionHistory.push({ text, ts, original: originalText || '' });
     if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
 
     // If history panel is visible, append new entry
     if (historyVisible) {
-      appendToHistory(text, ts);
+      appendToHistory(text, ts, originalText);
     }
   }
 

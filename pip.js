@@ -291,12 +291,12 @@
 
       // Add to history buffer
       const ts = Date.now();
-      captionHistory.push({ text, ts });
+      captionHistory.push({ text, ts, original: originalText || '' });
       if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
 
       // If history panel is visible, append new entry
       if (historyVisible) {
-        appendHistoryEntry(text, ts);
+        appendHistoryEntry(text, ts, originalText);
       }
     } else {
       if (currentPartialEl && currentPartialEl.parentNode === track) {
@@ -416,11 +416,11 @@
 
     // Render all history entries
     for (const entry of captionHistory) {
-      appendHistoryEntry(entry.text, entry.ts);
+      appendHistoryEntry(entry.text, entry.ts, entry.original);
     }
   }
 
-  function appendHistoryEntry(text, ts) {
+  function appendHistoryEntry(text, ts, originalText) {
     if (!historyScroll) return;
 
     const el = document.createElement('div');
@@ -431,18 +431,35 @@
     const d = new Date(ts);
     time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 
-    const textEl = document.createElement('span');
+    const contentEl = document.createElement('div');
+    contentEl.className = 'history-content';
+
+    if (originalText) {
+      const origEl = document.createElement('div');
+      origEl.className = 'history-original';
+      origEl.textContent = originalText;
+      contentEl.appendChild(origEl);
+    }
+
+    const textEl = document.createElement('div');
     textEl.className = 'history-text';
     textEl.textContent = text;
+    contentEl.appendChild(textEl);
 
     el.appendChild(time);
-    el.appendChild(textEl);
+    el.appendChild(contentEl);
     historyScroll.appendChild(el);
 
-    // Auto-scroll to bottom
-    requestAnimationFrame(() => {
-      historyScroll.scrollTop = historyScroll.scrollHeight;
-    });
+    // Near-Bottom Detection: only auto-scroll if user is already at bottom
+    const threshold = 80;
+    const { scrollHeight, scrollTop, clientHeight } = historyScroll;
+    const isNearBottom = scrollHeight - scrollTop - clientHeight < threshold;
+
+    if (isNearBottom) {
+      requestAnimationFrame(() => {
+        historyScroll.scrollTop = historyScroll.scrollHeight;
+      });
+    }
   }
 
   // ==================== LIFECYCLE ====================
