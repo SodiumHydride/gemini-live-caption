@@ -508,126 +508,20 @@ function arrayBufferToBase64(buffer) {
 }
 
 // ==================== RESPONSE HANDLING ====================
-// TranscriptionProcessor: handles cumulative output from Gemini Live API
-// with revision detection and stability buffering
-class TranscriptionProcessor {
-  constructor(options = {}) {
-    this.STABILITY_THRESHOLD = options.stabilityThreshold || 0.8;
-    this.BUFFER_KEEP = options.bufferKeep || 20;
-    this.reset();
-  }
-
-  reset() {
-    this.lastRawText = '';
-    this.confirmedText = '';
-    this.pendingBuffer = '';
-    this.revisionCount = 0;
-  }
-
-  // Process new cumulative transcription text
-  // Returns: { text: string, changed: boolean, isRevision: boolean }
-  process(newFullText) {
-    if (!newFullText) return { text: this.confirmedText, changed: false, isRevision: false };
-
-    // Exact duplicate
-    if (newFullText === this.lastRawText) {
-      return { text: this.confirmedText, changed: false, isRevision: false };
-    }
-
-    const prevText = this.lastRawText;
-    this.lastRawText = newFullText;
-
-    // Detect if this is a revision (modification of previous text) or append
-    const isRevision = this._detectRevision(prevText, newFullText);
-
-    if (isRevision) {
-      return this._handleRevision(prevText, newFullText);
-    } else {
-      return this._handleAppend(prevText, newFullText);
-    }
-  }
-
-  _detectRevision(prev, curr) {
-    if (!prev) return false;
-    // If current text doesn't start with previous text, it's a revision
-    return !curr.startsWith(prev);
-  }
-
-  _handleRevision(prev, curr) {
-    this.revisionCount++;
-
-    // Find first difference position
-    const minLen = Math.min(prev.length, curr.length);
-    let diffPos = 0;
-    while (diffPos < minLen && prev[diffPos] === curr[diffPos]) {
-      diffPos++;
-    }
-
-    // Keep confirmed text up to diff position
-    this.confirmedText = curr.substring(0, diffPos);
-    // Put remaining into pending buffer
-    this.pendingBuffer = curr.substring(diffPos);
-
-    dbg(`[TranscriptionProcessor] Revision detected at pos ${diffPos}, total revisions: ${this.revisionCount}`);
-
-    return { text: this.confirmedText + this.pendingBuffer, changed: true, isRevision: true };
-  }
-
-  _handleAppend(prev, curr) {
-    // Extract delta (new text after previous)
-    const delta = curr.substring(prev.length);
-    this.pendingBuffer += delta;
-
-    // If buffer is long enough, confirm the front part
-    if (this.pendingBuffer.length > this.BUFFER_KEEP * 2) {
-      const toConfirm = this.pendingBuffer.substring(0, this.pendingBuffer.length - this.BUFFER_KEEP);
-      this.confirmedText += toConfirm;
-      this.pendingBuffer = this.pendingBuffer.substring(this.pendingBuffer.length - this.BUFFER_KEEP);
-    }
-
-    return { text: this.confirmedText + this.pendingBuffer, changed: true, isRevision: false };
-  }
-
-  // Force confirm all pending text (called on turnComplete, punctuation flush, etc.)
-  flush() {
-    this.confirmedText += this.pendingBuffer;
-    this.pendingBuffer = '';
-    return this.confirmedText;
-  }
-
-  getFullText() {
-    return this.confirmedText + this.pendingBuffer;
-  }
-
-  getStats() {
-    return {
-      revisionCount: this.revisionCount,
-      confirmedLength: this.confirmedText.length,
-      pendingLength: this.pendingBuffer.length
-    };
-  }
-}
-
-// Create processor instances
-const outputProcessor = new TranscriptionProcessor();
-const inputProcessor = new TranscriptionProcessor({ bufferKeep: 10 });
-
-let bilingualMode = false;  // Controlled by settings
+let partialText = '';
+let partialInputText = '';
+let bilingualMode = false;
 let gapFlushTimer = null;
 // Punctuation-based segmentation: flush at first punctuation after MIN_FLUSH_CHARS
 function tryFlushAtPunctuation() {
-  const currentText = outputProcessor.getFullText();
-  if (currentText.length < CONFIG.MIN_FLUSH_CHARS) return false;
+  if (partialText.length < CONFIG.MIN_FLUSH_CHARS) return false;
   const ends = /[。！？.!?，,]/g;
   let m;
-  while ((m = ends.exec(currentText)) !== null) {
+  while ((m = ends.exec(partialText)) !== null) {
     if (m.index >= CONFIG.MIN_FLUSH_CHARS - 1) {
       if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-      const toSend = currentText.substring(0, m.index + 1).trim();
-      const remaining = currentText.substring(m.index + 1);
-      outputProcessor.reset();
-      if (remaining) outputProcessor.process(remaining);
-      sendCaption(toSend, true);
+      sendCaption(partialText.substring(0, m.index + 1).trim(), true);
+      partialText = partialText.substring(m.index + 1);
       return true;
     }
   }
@@ -722,7 +616,7 @@ function logSignals(sc) {
 
 function handleInterrupted() {
   dbg('Generation interrupted');
-  outputProcessor.reset();
+  partialText = '';
   sendCaption('', false);
 }
 
@@ -733,28 +627,26 @@ function handleOutputTranscription(sc) {
     dbg(`First caption after ${(Date.now() - (sessionStartTime || Date.now())) / 1000}s gap`);
   }
 
-  const result = outputProcessor.process(sc.outputTranscription.text);
-  if (!result.changed) return;
-
-  const fullText = outputProcessor.getFullText();
+  partialText += sc.outputTranscription.text;
   resetCaptionWatchdog();
-  if (fullText.trim()) sendCaption(fullText.trim(), false);
+  if (partialText.trim()) sendCaption(partialText.trim(), false);
 
   // Restart gap timer on each text arrival
   if (gapFlushTimer) clearTimeout(gapFlushTimer);
   gapFlushTimer = setTimeout(() => {
     gapFlushTimer = null;
-    const currentText = outputProcessor.getFullText();
-    if (!tryFlushAtPunctuation() && currentText.trim().length >= CONFIG.MIN_FLUSH_CHARS) {
-      outputProcessor.flush();
-      sendCaption(currentText.trim(), true);
+    if (!tryFlushAtPunctuation() && partialText.trim().length >= CONFIG.MIN_FLUSH_CHARS) {
+      sendCaption(partialText.trim(), true);
+      partialText = '';
     }
   }, CONFIG.GAP_FLUSH_MS);
 }
 
 function handleInputTranscription(sc) {
   if (!sc.inputTranscription || !sc.inputTranscription.text) return;
-  inputProcessor.process(sc.inputTranscription.text);
+  if (bilingualMode) {
+    partialInputText += sc.inputTranscription.text;
+  }
   resetCaptionWatchdog();
 }
 
@@ -762,12 +654,12 @@ function handleModelTurn(sc) {
   if (!sc.modelTurn || !sc.modelTurn.parts) return;
 
   for (const part of sc.modelTurn.parts) {
-    if (part.text && !outputProcessor.getFullText().endsWith(part.text)) {
-      outputProcessor.process(outputProcessor.getFullText() + part.text);
+    if (part.text && !partialText.endsWith(part.text)) {
+      partialText += part.text;
     }
   }
-  if (outputProcessor.getFullText().trim()) {
-    sendCaption(outputProcessor.getFullText().trim(), false);
+  if (partialText.trim()) {
+    sendCaption(partialText.trim(), false);
   }
 }
 
@@ -778,21 +670,19 @@ function handleSegmentation(sc) {
 function handleTurnComplete(sc) {
   if (!sc.outputTranscription?.finished && !sc.turnComplete && !sc.waitingForInput) return;
 
-  const currentText = outputProcessor.getFullText();
-  if (currentText.trim().length < CONFIG.MIN_FLUSH_CHARS) return;
+  if (partialText.trim().length < CONFIG.MIN_FLUSH_CHARS) return;
 
   if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-  const flushed = outputProcessor.flush();
-  sendCaption(flushed.trim(), true);
+  sendCaption(partialText.trim(), true);
+  partialText = '';
 }
 
 function handleBufferOverflow() {
-  const fullText = outputProcessor.getFullText();
-  if (fullText.length <= 150) return;
+  if (partialText.length <= 150) return;
 
   console.warn('[Offscreen] Buffer overflow, force-flushing 150+ chars');
-  const flushed = outputProcessor.flush();
-  sendCaption(flushed.trim(), true);
+  sendCaption(partialText.trim(), true);
+  partialText = '';
 }
 
 function handleGenerationComplete(sc) {
@@ -855,8 +745,8 @@ function reconnectWebSocket() {
     gapFlushTimer = null;
   }
   setupComplete = false;
-  outputProcessor.reset();
-  inputProcessor.reset();
+  partialText = '';
+  partialInputText = '';
   const t0 = Date.now();
   connectWebSocket().then(() => {
     dbg(`Reconnect successful (took ${Date.now() - t0}ms), waiting for captions...`);
@@ -1094,7 +984,8 @@ function sendCaption(text, isFinal, originalText) {
     isFinal,
   };
   if (bilingualMode) {
-    msg.original = originalText || (isFinal ? inputProcessor.flush() : inputProcessor.getFullText());
+    msg.original = originalText || (isFinal ? partialInputText.trim() : partialInputText.trim());
+    if (isFinal) partialInputText = '';
   }
   chrome.runtime.sendMessage(msg).catch(err => {
     sendMessageFailCount++;
