@@ -321,6 +321,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'SET_POSITION') {
+    if (!isFromPopup(sender)) return false;
+    (async () => {
+      const { activeTabId } = await chrome.storage.session.get('activeTabId');
+      if (activeTabId) {
+        try {
+          await chrome.tabs.sendMessage(activeTabId, { type: 'SET_POSITION', preset: msg.preset });
+        } catch (e) {}
+      }
+      await chrome.storage.local.set({ captionPosition: msg.preset });
+      sendResponse({ success: true });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'SET_TEXT_COLOR') {
+    if (!isFromPopup(sender)) return false;
+    (async () => {
+      const { activeTabId } = await chrome.storage.session.get('activeTabId');
+      if (activeTabId) {
+        try {
+          await chrome.tabs.sendMessage(activeTabId, { type: 'SET_TEXT_COLOR', color: msg.color });
+        } catch (e) {}
+      }
+      await chrome.storage.local.set({ textColor: msg.color });
+      sendResponse({ success: true });
+    })();
+    return true;
+  }
+
   if (msg.type === 'AUDIO_LOST') {
     if (!isFromOffscreen(sender)) return false;
     (async () => {
@@ -374,6 +404,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch (e) {
         // Offscreen may not exist
         sendResponse({ entries: [] });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'EXPORT_CAPTIONS') {
+    if (!isFromPopup(sender)) return false;
+    (async () => {
+      const { activeTabId } = await chrome.storage.session.get('activeTabId');
+      if (activeTabId) {
+        try {
+          const response = await chrome.tabs.sendMessage(activeTabId, { type: 'EXPORT_CAPTIONS' });
+          sendResponse(response || { captions: [], srt: '' });
+        } catch (e) {
+          sendResponse({ captions: [], srt: '' });
+        }
+      } else {
+        sendResponse({ captions: [], srt: '' });
       }
     })();
     return true;

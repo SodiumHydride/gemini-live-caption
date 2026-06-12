@@ -92,7 +92,7 @@
       if (!event.data || !event.data.type) return;
       switch (event.data.type) {
         case 'CAPTION_UPDATE':
-          show(event.data.text, event.data.isFinal);
+          show(event.data.text, event.data.isFinal, event.data.original);
           break;
         case 'CLEAR_CAPTIONS':
           clearCaptions();
@@ -132,7 +132,7 @@
   function sendSetting(key, value) {
     try {
       if (window.opener) {
-        window.opener.postMessage({ type: 'PIP_SETTINGS_CHANGED', key, value }, '*');
+        window.opener.postMessage({ type: 'PIP_SETTINGS_CHANGED', key, value }, window.location.origin);
       }
     } catch (e) {}
   }
@@ -189,10 +189,24 @@
   }
 
   // ==================== ADD LINE ====================
-  function addLine(text) {
+  function addLine(text, originalText) {
     const el = document.createElement('div');
     el.className = 'line';
-    el.textContent = text;
+
+    if (originalText) {
+      // Bilingual mode: original + translated
+      const origEl = document.createElement('div');
+      origEl.className = 'line-original';
+      origEl.textContent = originalText;
+      const transEl = document.createElement('div');
+      transEl.className = 'line-translated';
+      transEl.textContent = text;
+      el.appendChild(origEl);
+      el.appendChild(transEl);
+    } else {
+      el.textContent = text;
+    }
+
     track.appendChild(el);
     lineCount++;
 
@@ -222,7 +236,7 @@
   }
 
   // ==================== SHOW ====================
-  function show(text, isFinal) {
+  function show(text, isFinal, originalText) {
     if (!text) return;
 
     if (isFinal) {
@@ -236,13 +250,29 @@
       lastFinalized = text;
       currentPartialEl = null;
       currentPartialText = '';
-      addLine(text);
+      addLine(text, originalText);
     } else {
       if (currentPartialEl && currentPartialEl.parentNode === track) {
-        currentPartialEl.textContent = text;
+        // Update translated text
+        const transEl = currentPartialEl.querySelector('.line-translated');
+        if (transEl) {
+          transEl.textContent = text;
+        } else {
+          currentPartialEl.textContent = text;
+        }
+        // Update original text if available
+        if (originalText) {
+          let origEl = currentPartialEl.querySelector('.line-original');
+          if (!origEl) {
+            origEl = document.createElement('div');
+            origEl.className = 'line-original';
+            currentPartialEl.insertBefore(origEl, currentPartialEl.firstChild);
+          }
+          origEl.textContent = originalText;
+        }
         currentPartialText = text;
       } else {
-        addLine(text);
+        addLine(text, originalText);
         currentPartialEl = track.lastChild;
         currentPartialText = text;
       }
@@ -297,7 +327,7 @@
   function notifyClosed() {
     try {
       if (window.opener) {
-        window.opener.postMessage({ type: 'PIP_CLOSED' }, '*');
+        window.opener.postMessage({ type: 'PIP_CLOSED' }, window.location.origin);
       }
     } catch (e) {}
   }

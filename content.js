@@ -204,7 +204,7 @@
       }
 
       .line {
-        color: #fff;
+        color: var(--cap-text, #fff);
         font-size: var(--cap-font-size); font-weight: 500; line-height: 1.45;
         padding: .3em 1em;
         text-align: center;
@@ -213,6 +213,19 @@
         transition: opacity .25s ease-out, padding .25s ease-out, max-height .25s ease-out;
         max-height: 10em;
         overflow: hidden;
+        user-select: text;
+        -webkit-user-select: text;
+        cursor: text;
+      }
+
+      .line-original {
+        font-size: calc(var(--cap-font-size) * 0.85);
+        color: rgba(255, 255, 255, 0.6);
+        margin-bottom: 2px;
+      }
+
+      .line-translated {
+        color: var(--cap-text, #fff);
       }
 
       .ph {
@@ -261,10 +274,24 @@
   // ==================== ADD LINE ====================
   let viewportLocked = false;
 
-  function addLine(text) {
+  function addLine(text, originalText) {
     const el = document.createElement('div');
     el.className = 'line';
-    el.textContent = text;
+
+    if (originalText) {
+      // Bilingual mode: original + translated
+      const origEl = document.createElement('div');
+      origEl.className = 'line-original';
+      origEl.textContent = originalText;
+      const transEl = document.createElement('div');
+      transEl.className = 'line-translated';
+      transEl.textContent = text;
+      el.appendChild(origEl);
+      el.appendChild(transEl);
+    } else {
+      el.textContent = text;
+    }
+
     track.appendChild(el);
     lineCount++;
 
@@ -304,7 +331,7 @@
   let currentPartialEl = null;
   let currentPartialText = '';
 
-  function show(text, isFinal) {
+  function show(text, isFinal, originalText) {
     if (!text) return;
 
     if (isFinal) {
@@ -323,14 +350,30 @@
       lastFinalized = text;
       currentPartialEl = null;
       currentPartialText = '';
-      addLine(text);
+      addLine(text, originalText);
     } else {
       // Partial: update current line in-place (live preview)
       if (currentPartialEl && currentPartialEl.parentNode === track) {
-        currentPartialEl.textContent = text;
+        // Update translated text
+        const transEl = currentPartialEl.querySelector('.line-translated');
+        if (transEl) {
+          transEl.textContent = text;
+        } else {
+          currentPartialEl.textContent = text;
+        }
+        // Update original text if available
+        if (originalText) {
+          let origEl = currentPartialEl.querySelector('.line-original');
+          if (!origEl) {
+            origEl = document.createElement('div');
+            origEl.className = 'line-original';
+            currentPartialEl.insertBefore(origEl, currentPartialEl.firstChild);
+          }
+          origEl.textContent = originalText;
+        }
         currentPartialText = text;
       } else {
-        addLine(text);
+        addLine(text, originalText);
         currentPartialEl = track.lastChild;
         currentPartialText = text;
       }
@@ -457,22 +500,69 @@
   }
 
   // ==================== LAYOUT ====================
+  const POSITION_PRESETS = {
+    'bottom-center': { x: null, y: null },  // null = auto-center
+    'top-center': { x: null, y: 20, top: true },
+    'bottom-left': { x: 20, y: null },
+    'bottom-right': { x: null, y: null, right: 20 },
+    'top-left': { x: 20, y: 20, top: true },
+    'top-right': { x: null, y: 20, top: true, right: 20 },
+  };
+
   function applyPos() {
     if (!wrap) return;
     wrap.style.width = layout.w + 'px';
-    if (layout.x != null) {
-      wrap.style.left = layout.x + 'px';
+
+    // Apply preset or custom position
+    if (layout.preset && POSITION_PRESETS[layout.preset]) {
+      const p = POSITION_PRESETS[layout.preset];
+      if (p.x != null) {
+        wrap.style.left = p.x + 'px';
+        wrap.style.right = 'auto';
+        wrap.style.transform = 'none';
+      } else if (p.right != null) {
+        wrap.style.right = p.right + 'px';
+        wrap.style.left = 'auto';
+        wrap.style.transform = 'none';
+      } else {
+        wrap.style.left = '50%';
+        wrap.style.right = 'auto';
+        wrap.style.transform = 'translateX(-50%)';
+      }
+      if (p.top) {
+        wrap.style.top = (p.y || 20) + 'px';
+        wrap.style.bottom = 'auto';
+      } else {
+        wrap.style.bottom = (p.y || 40) + 'px';
+        wrap.style.top = 'auto';
+      }
     } else {
-      wrap.style.left = '50%';
-      wrap.style.transform = 'translateX(-50%)';
+      // Custom position (dragged)
+      if (layout.x != null) {
+        wrap.style.left = layout.x + 'px';
+        wrap.style.right = 'auto';
+        wrap.style.transform = 'none';
+      } else {
+        wrap.style.left = '50%';
+        wrap.style.right = 'auto';
+        wrap.style.transform = 'translateX(-50%)';
+      }
+      if (layout.y != null) {
+        wrap.style.top = layout.y + 'px';
+        wrap.style.bottom = 'auto';
+      } else {
+        wrap.style.bottom = '40px';
+        wrap.style.top = 'auto';
+      }
     }
-    if (layout.y != null) {
-      wrap.style.top = layout.y + 'px';
-      wrap.style.bottom = 'auto';
-    } else {
-      wrap.style.bottom = '40px';
-      wrap.style.top = 'auto';
-    }
+  }
+
+  function setPositionPreset(preset) {
+    layout.preset = preset;
+    layout.x = null;
+    layout.y = null;
+    applyPos();
+    save();
   }
 
   function save() { chrome.storage.local.set({ [STORE_KEY]: layout }); }
@@ -613,19 +703,46 @@
     }
   }
 
-  // Caption ring buffer for PiP catch-up
+  // Caption ring buffer for PiP catch-up and history export
+  const CAPTION_HISTORY_SIZE = 500;  // Keep last 500 finalized captions
+  const captionHistory = [];
+  let sessionStartTime = null;
+
+  // PiP buffer is a subset of history (most recent)
   const PIP_BUFFER_SIZE = 20;
-  const captionBuffer = [];
 
   function bufferCaption(text, isFinal) {
     if (!isFinal) return; // Only buffer finalized captions
-    captionBuffer.push({ text, ts: Date.now() });
-    if (captionBuffer.length > PIP_BUFFER_SIZE) captionBuffer.shift();
+    if (!sessionStartTime) sessionStartTime = Date.now();
+    captionHistory.push({ text, ts: Date.now() });
+    if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
+  }
+
+  function getCaptionHistory() {
+    return captionHistory.slice();
+  }
+
+  function formatSRT(entries) {
+    if (!entries.length) return '';
+    const startTime = entries[0].ts;
+    return entries.map((entry, i) => {
+      const start = entry.ts - startTime;
+      const end = (i < entries.length - 1 ? entries[i + 1].ts : entry.ts + 2000) - startTime;
+      const formatTime = (ms) => {
+        const h = Math.floor(ms / 3600000);
+        const m = Math.floor((ms % 3600000) / 60000);
+        const s = Math.floor((ms % 60000) / 1000);
+        const ms2 = ms % 1000;
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms2).padStart(3, '0')}`;
+      };
+      return `${i + 1}\n${formatTime(start)} --> ${formatTime(end)}\n${entry.text}\n`;
+    }).join('\n');
   }
 
   function replayBufferToPiP() {
     if (!pipWindow || pipWindow.closed) return;
-    for (const entry of captionBuffer) {
+    const recent = captionHistory.slice(-PIP_BUFFER_SIZE);
+    for (const entry of recent) {
       postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true });
     }
   }
@@ -633,7 +750,7 @@
   function postToPiP(msg) {
     if (!pipWindow || pipWindow.closed) return;
     try {
-      pipWindow.postMessage(msg, '*');
+      pipWindow.postMessage(msg, window.location.origin);
     } catch (e) {
       // Window may have navigated or closed
     }
@@ -669,12 +786,12 @@
             console.warn('[Gemini Live Caption] Reinit failed:', reinitErr);
           }
         }
-        show(msg.text, msg.isFinal);
+        show(msg.text, msg.isFinal, msg.original);
         // Show PiP button when captions are flowing
         if (pipBtn) pipBtn.classList.add('vis');
         // Relay to PiP window and buffer for catch-up
-        bufferCaption(msg.text, msg.isFinal);
-        postToPiP({ type: 'CAPTION_UPDATE', text: msg.text, isFinal: msg.isFinal });
+        bufferCaption(msg.text, msg.isFinal, msg.original);
+        postToPiP({ type: 'CAPTION_UPDATE', text: msg.text, isFinal: msg.isFinal, original: msg.original });
       } else if (msg.type === 'CLEAR_CAPTIONS') {
         clearCaptions();
         postToPiP({ type: 'CLEAR_CAPTIONS' });
@@ -683,6 +800,16 @@
         updateStatus('idle', '');
       } else if (msg.type === 'STATUS_UPDATE') {
         updateStatus(msg.status, msg.message);
+      } else if (msg.type === 'SET_POSITION') {
+        setPositionPreset(msg.preset);
+      } else if (msg.type === 'SET_TEXT_COLOR') {
+        if (shadow && shadow.host) {
+          shadow.host.style.setProperty('--cap-text', msg.color);
+        }
+      } else if (msg.type === 'EXPORT_CAPTIONS') {
+        const history = getCaptionHistory();
+        const srt = formatSRT(history);
+        return { captions: history, srt };
       }
     } catch (e) {
       if (e.message && e.message.includes('Extension context invalidated')) {

@@ -104,11 +104,48 @@
         <label class="setting-label">🔇 Noise Gate <span id="gateValue" class="setting-value">Off</span></label>
         <input type="range" id="noiseGate" class="setting-range" min="0" max="50" value="0" step="1">
       </div>
+
+      <!-- Bilingual Mode -->
+      <div class="setting-group">
+        <label class="setting-label toggle-label">
+          🌍 Bilingual Mode
+          <input type="checkbox" id="bilingualMode" class="toggle-checkbox">
+          <span class="toggle-switch"></span>
+        </label>
+        <p class="setting-hint">Show original language alongside translation</p>
+      </div>
+
+      <!-- Caption Position -->
+      <div class="setting-group">
+        <label class="setting-label">📍 Caption Position</label>
+        <div class="position-grid" id="positionControl">
+          <button class="pos-btn" data-value="top-left" title="Top Left">↖</button>
+          <button class="pos-btn" data-value="top-center" title="Top Center">↑</button>
+          <button class="pos-btn" data-value="top-right" title="Top Right">↗</button>
+          <button class="pos-btn" data-value="bottom-left" title="Bottom Left">↙</button>
+          <button class="pos-btn active" data-value="bottom-center" title="Bottom Center">↓</button>
+          <button class="pos-btn" data-value="bottom-right" title="Bottom Right">↘</button>
+        </div>
+      </div>
+
+      <!-- Text Color -->
+      <div class="setting-group">
+        <label class="setting-label">✏️ Text Color</label>
+        <div class="color-picker" id="textColorControl">
+          <button class="color-btn active" data-value="#ffffff" title="White" style="background:#ffffff"></button>
+          <button class="color-btn" data-value="#f0f0f0" title="Light Gray" style="background:#f0f0f0"></button>
+          <button class="color-btn" data-value="#ffeb3b" title="Yellow" style="background:#ffeb3b"></button>
+          <button class="color-btn" data-value="#4fc3f7" title="Light Blue" style="background:#4fc3f7"></button>
+          <button class="color-btn" data-value="#81c784" title="Light Green" style="background:#81c784"></button>
+          <button class="color-btn" data-value="#ff8a65" title="Orange" style="background:#ff8a65"></button>
+        </div>
+      </div>
     </div>
 
-    <!-- Diagnostic -->
-    <div class="diagnostic-section">
-      <button class="export-logs-btn" id="exportLogs">Export Logs</button>
+    <!-- Export -->
+    <div class="export-section">
+      <button class="export-btn" id="exportCaptions">Export Subtitles (SRT)</button>
+      <button class="export-btn secondary" id="exportLogs">Export Logs</button>
     </div>
 
     <!-- Footer -->

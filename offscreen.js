@@ -111,6 +111,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'UPDATE_SETTINGS') {
     currentSettings = { ...currentSettings, ...msg.settings };
 
+    // Update bilingual mode
+    if (msg.settings.bilingualMode !== undefined) {
+      bilingualMode = msg.settings.bilingualMode;
+    }
+
     // Update worklet parameters in real-time (no restart needed)
     if (workletNode && msg.settings.audioGain !== undefined) {
       workletNode.port.postMessage({ gain: msg.settings.audioGain });
@@ -367,22 +372,23 @@ async function connectWebSocket() {
 
 // Process a single WebSocket message (string). Handles setup detection and error routing.
 function processMessage(text, resolve, reject) {
+  let msg;
   try {
-    const raw = JSON.parse(text);
-    dbg('Received:', JSON.stringify(raw).substring(0, 200));
-  } catch (e) {}
+    msg = JSON.parse(text);
+    dbg('Received:', JSON.stringify(msg).substring(0, 200));
+  } catch (e) {
+    console.warn('[Offscreen] Failed to parse WebSocket message:', e.message);
+    return;
+  }
 
-  handleGeminiResponse(text);
+  handleGeminiResponse(msg);
 
   // Resolve on first meaningful response
   if (!setupComplete) {
-    try {
-      const parsed = JSON.parse(text);
-      if (parsed.error) {
-        reject(new Error(`Server error: ${parsed.error.message || JSON.stringify(parsed.error)}`));
-        return;
-      }
-    } catch (e) {}
+    if (msg.error) {
+      reject(new Error(`Server error: ${msg.error.message || JSON.stringify(msg.error)}`));
+      return;
+    }
     setupComplete = true;
     reconnectAttempts = 0;
     startCaptionWatchdog();
@@ -478,13 +484,13 @@ function arrayBufferToBase64(buffer) {
 
 // ==================== RESPONSE HANDLING ====================
 let partialText = '';
+let partialInputText = '';  // Input transcription buffer (original language)
+let bilingualMode = false;  // Controlled by settings
 let gapFlushTimer = null;
 const GAP_FLUSH_MS = 700;   // Flush after 700ms of no new text (for talk-show/news)
 const MIN_FLUSH_CHARS = 10; // Minimum chars before punctuation-based flush kicks in
 
-function handleGeminiResponse(data) {
-  try {
-    const msg = JSON.parse(data);
+function handleGeminiResponse(msg) {
 
     // Setup complete confirmation
     if (msg.setupComplete) {
@@ -636,11 +642,12 @@ function handleGeminiResponse(data) {
       // Input transcription — connection is alive, reset watchdog
       if (sc.inputTranscription && sc.inputTranscription.text) {
         resetCaptionWatchdog();
+        // Buffer input transcription for bilingual mode
+        if (bilingualMode) {
+          partialInputText += sc.inputTranscription.text;
+        }
       }
     }
-  } catch (err) {
-    console.error('[Offscreen] Failed to parse Gemini response:', err, data);
-  }
 }
 
 // ==================== RECONNECTION ====================
@@ -921,13 +928,23 @@ async function _rebuildAudioChain() {
 }
 
 // ==================== HELPERS ====================
-function sendCaption(text, isFinal) {
+function consumeInputText() {
+  const text = partialInputText.trim();
+  partialInputText = '';
+  return text;
+}
+
+function sendCaption(text, isFinal, originalText) {
   if (text) resetCaptionWatchdog();
-  chrome.runtime.sendMessage({
+  const msg = {
     type: 'CAPTION_UPDATE',
     text,
     isFinal,
-  }).catch(() => {});
+  };
+  if (bilingualMode) {
+    msg.original = originalText || consumeInputText();
+  }
+  chrome.runtime.sendMessage(msg).catch(() => {});
 }
 
 function sendStatus(status, message) {

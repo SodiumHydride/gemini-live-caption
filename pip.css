@@ -96,6 +96,16 @@ html, body {
   overflow: hidden;
 }
 
+.line-original {
+  font-size: calc(var(--cap-font-size) * 0.85);
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 2px;
+}
+
+.line-translated {
+  color: var(--cap-text);
+}
+
 /* ── Placeholder ───────────────────────────────────────── */
 #placeholder {
   position: absolute;

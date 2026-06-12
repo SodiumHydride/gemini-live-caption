@@ -19,7 +19,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ==================== LOAD SETTINGS ====================
   const settings = await chrome.storage.local.get([
-    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'noiseGate'
+    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'noiseGate', 'captionPosition', 'textColor', 'bilingualMode'
   ]);
 
   if (settings.apiKey) apiKeyInput.value = settings.apiKey;
@@ -43,6 +43,26 @@ document.addEventListener('DOMContentLoaded', async () => {
     const val = Math.round(settings.noiseGate * 1000);
     noiseGateSlider.value = val;
     gateValue.textContent = val === 0 ? 'Off' : `${(val / 1000).toFixed(3)}`;
+  }
+  if (settings.bilingualMode) {
+    const bilingualCheckbox = document.getElementById('bilingualMode');
+    if (bilingualCheckbox) bilingualCheckbox.checked = true;
+  }
+  if (settings.captionPosition) {
+    const posControl = document.getElementById('positionControl');
+    if (posControl) {
+      posControl.querySelectorAll('.pos-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.value === settings.captionPosition);
+      });
+    }
+  }
+  if (settings.textColor) {
+    const colorControl = document.getElementById('textColorControl');
+    if (colorControl) {
+      colorControl.querySelectorAll('.color-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.value === settings.textColor);
+      });
+    }
   }
 
   // ==================== GET CURRENT STATUS ====================
@@ -208,6 +228,85 @@ document.addEventListener('DOMContentLoaded', async () => {
   noiseGateSlider.addEventListener('change', () => {
     saveSettings({ noiseGate: parseInt(noiseGateSlider.value) / 1000 });
   });
+
+  // ==================== POSITION PRESET ====================
+  const positionControl = document.getElementById('positionControl');
+  if (positionControl) {
+    positionControl.addEventListener('click', (e) => {
+      const btn = e.target.closest('.pos-btn');
+      if (!btn) return;
+      positionControl.querySelectorAll('.pos-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      chrome.runtime.sendMessage({
+        type: 'SET_POSITION',
+        preset: btn.dataset.value,
+      }).catch(() => {});
+    });
+  }
+
+  // ==================== TEXT COLOR ====================
+  const textColorControl = document.getElementById('textColorControl');
+  if (textColorControl) {
+    textColorControl.addEventListener('click', (e) => {
+      const btn = e.target.closest('.color-btn');
+      if (!btn) return;
+      textColorControl.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      chrome.runtime.sendMessage({
+        type: 'SET_TEXT_COLOR',
+        color: btn.dataset.value,
+      }).catch(() => {});
+    });
+  }
+
+  // ==================== BILINGUAL MODE ====================
+  const bilingualCheckbox = document.getElementById('bilingualMode');
+  if (bilingualCheckbox) {
+    bilingualCheckbox.addEventListener('change', () => {
+      saveSettings({ bilingualMode: bilingualCheckbox.checked });
+    });
+  }
+
+  // ==================== EXPORT SUBTITLES ====================
+  const exportCaptionsBtn = document.getElementById('exportCaptions');
+  if (exportCaptionsBtn) {
+    exportCaptionsBtn.addEventListener('click', async () => {
+      exportCaptionsBtn.disabled = true;
+      exportCaptionsBtn.textContent = 'Exporting...';
+
+      try {
+        const response = await chrome.runtime.sendMessage({ type: 'EXPORT_CAPTIONS' });
+        if (response && response.srt && response.srt.length > 0) {
+          // Download SRT file
+          const blob = new Blob([response.srt], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `gemini-caption-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.srt`;
+          a.click();
+          URL.revokeObjectURL(url);
+          exportCaptionsBtn.textContent = 'Downloaded!';
+          setTimeout(() => {
+            exportCaptionsBtn.textContent = 'Export Subtitles (SRT)';
+            exportCaptionsBtn.disabled = false;
+          }, 2000);
+        } else {
+          exportCaptionsBtn.textContent = 'No subtitles';
+          setTimeout(() => {
+            exportCaptionsBtn.textContent = 'Export Subtitles (SRT)';
+            exportCaptionsBtn.disabled = false;
+          }, 2000);
+        }
+      } catch (err) {
+        console.error('Export captions failed:', err);
+        exportCaptionsBtn.textContent = 'Failed';
+        setTimeout(() => {
+          exportCaptionsBtn.textContent = 'Export Subtitles (SRT)';
+          exportCaptionsBtn.disabled = false;
+        }, 2000);
+      }
+    });
+  }
 
   // ==================== EXPORT DIAGNOSTIC LOGS ====================
   const exportLogsBtn = document.getElementById('exportLogs');
