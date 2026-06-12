@@ -323,6 +323,7 @@ html, body {
   scrollbar-color: rgba(255, 255, 255, 0.15) transparent;
 }
 .history-scroll::-webkit-scrollbar {
+  display: block;
   width: 6px;
 }
 .history-scroll::-webkit-scrollbar-track {

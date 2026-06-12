@@ -196,6 +196,7 @@
         all: initial !important;
         --cap-font-size: 3.2vh;
         --cap-bg: rgba(0,0,0,0.78);
+        --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
       }
 
       .w {
