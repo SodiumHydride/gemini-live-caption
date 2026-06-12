@@ -56,36 +56,54 @@ let workletNode = null;
 let websocket = null;
 let isCapturing = false;
 let reconnectTimer = null;
-let heartbeatTimer = null;  // Keeps SW alive via periodic messages
-let wsGeneration = 0;       // Tracks WebSocket connection generation; stopCapture increments it
+let heartbeatTimer = null;
+let wsGeneration = 0;
 let currentSettings = {};
-let isReconnecting = false; // Guard: prevents watchdog from firing during reconnection
-let resumptionHandle = null; // Session resumption token from Gemini (valid 2h)
+let isReconnecting = false;
+let resumptionHandle = null;
 
-// Device change detection: track current output device and rebuild audio chain on switch
+// Device change detection
 let currentOutputDeviceId = null;
 let deviceChangeDebounceTimer = null;
-const DEVICE_CHANGE_DEBOUNCE_MS = 300;
 
 // Session management state
 let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 8;  // More attempts for long sessions
-const BASE_RECONNECT_DELAY = 3000; // 3s, doubles each attempt
-
-// Caption watchdog: if WebSocket is open but no captions arrive for this duration,
-// the session is silently dead (Gemini stopped transcribing). Force reconnect.
-// Only fires when audio IS being sent (silence is not a failure).
-const CAPTION_WATCHDOG_MS = 15000;
 let captionWatchdogTimer = null;
 let lastCaptionTime = 0;
-let lastAudioSendTime = 0;  // Track when audio was last sent to Gemini
-
-// Proactive session rotation: Gemini Live Translate sessions die after ~10 min.
-// Instead of waiting for GoAway or silent death, rotate the session BEFORE it expires.
-// This eliminates caption gaps — the new session is ready before the old one dies.
-const SESSION_ROTATE_MS = 8 * 60 * 1000; // 8 minutes (before the ~10 min limit)
+let lastAudioSendTime = 0;
 let sessionRotateTimer = null;
 let sessionStartTime = 0;
+
+// Configuration constants
+const CONFIG = {
+  // Reconnection
+  MAX_RECONNECT_ATTEMPTS: 8,
+  BASE_RECONNECT_DELAY: 3000,      // 3s, doubles each attempt
+
+  // Watchdog
+  CAPTION_WATCHDOG_MS: 15000,      // 15s no captions = session dead
+  WATCHDOG_AUDIO_THRESHOLD: 10000, // Only trigger if audio was sent within 10s
+
+  // Session rotation
+  SESSION_ROTATE_MS: 8 * 60 * 1000, // 8 minutes (before ~10 min limit)
+
+  // Device change
+  DEVICE_CHANGE_DEBOUNCE_MS: 300,
+
+  // Transcription processing
+  GAP_FLUSH_MS: 700,               // Flush after 700ms of no new text
+  MIN_FLUSH_CHARS: 10,             // Minimum chars before punctuation flush
+  BUFFER_OVERFLOW_LIMIT: 150,      // Force flush at 150 chars
+
+  // Heartbeat
+  HEARTBEAT_INTERVAL_MS: 20000,    // 20s heartbeat to keep SW alive
+
+  // WebSocket
+  WS_CONNECT_TIMEOUT_MS: 15000,    // 15s connection timeout
+
+  // Send failure
+  MAX_SEND_FAILURES: 5,            // Auto-reconnect after 5 failures
+};
 
 // ==================== MESSAGE HANDLER ====================
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -596,17 +614,14 @@ const inputProcessor = new TranscriptionProcessor({ bufferKeep: 10 });
 
 let bilingualMode = false;  // Controlled by settings
 let gapFlushTimer = null;
-const GAP_FLUSH_MS = 700;   // Flush after 700ms of no new text (for talk-show/news)
-const MIN_FLUSH_CHARS = 10; // Minimum chars before punctuation-based flush kicks in
-
 // Punctuation-based segmentation: flush at first punctuation after MIN_FLUSH_CHARS
 function tryFlushAtPunctuation() {
   const currentText = outputProcessor.getFullText();
-  if (currentText.length < MIN_FLUSH_CHARS) return false;
+  if (currentText.length < CONFIG.MIN_FLUSH_CHARS) return false;
   const ends = /[。！？.!?，,]/g;
   let m;
   while ((m = ends.exec(currentText)) !== null) {
-    if (m.index >= MIN_FLUSH_CHARS - 1) {
+    if (m.index >= CONFIG.MIN_FLUSH_CHARS - 1) {
       if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
       const toSend = currentText.substring(0, m.index + 1).trim();
       const remaining = currentText.substring(m.index + 1);
@@ -730,11 +745,11 @@ function handleOutputTranscription(sc) {
   gapFlushTimer = setTimeout(() => {
     gapFlushTimer = null;
     const currentText = outputProcessor.getFullText();
-    if (!tryFlushAtPunctuation() && currentText.trim().length >= MIN_FLUSH_CHARS) {
+    if (!tryFlushAtPunctuation() && currentText.trim().length >= CONFIG.MIN_FLUSH_CHARS) {
       outputProcessor.flush();
       sendCaption(currentText.trim(), true);
     }
-  }, GAP_FLUSH_MS);
+  }, CONFIG.GAP_FLUSH_MS);
 }
 
 function handleInputTranscription(sc) {
@@ -764,7 +779,7 @@ function handleTurnComplete(sc) {
   if (!sc.outputTranscription?.finished && !sc.turnComplete && !sc.waitingForInput) return;
 
   const currentText = outputProcessor.getFullText();
-  if (currentText.trim().length < MIN_FLUSH_CHARS) return;
+  if (currentText.trim().length < CONFIG.MIN_FLUSH_CHARS) return;
 
   if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
   const flushed = outputProcessor.flush();
@@ -795,15 +810,15 @@ function scheduleReconnect() {
   dbg(`scheduleReconnect called, attempts: ${reconnectAttempts}`);
   if (reconnectTimer) return;
 
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+  if (reconnectAttempts >= CONFIG.MAX_RECONNECT_ATTEMPTS) {
     console.error('[Offscreen] Max reconnect attempts reached, giving up');
-    sendStatus('error', `Connection failed after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+    sendStatus('error', `Connection failed after ${CONFIG.MAX_RECONNECT_ATTEMPTS} attempts`);
     stopCapture();
     return;
   }
 
   // Exponential backoff: 3s, 6s, 12s, 24s, 48s
-  const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts);
+  const delay = CONFIG.BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts);
   reconnectAttempts++;
   dbg(`Scheduling reconnect #${reconnectAttempts} in ${delay}ms...`);
 
@@ -873,7 +888,7 @@ function startCaptionWatchdog() {
     // 1. No captions for CAPTION_WATCHDOG_MS (connection likely dead)
     // 2. Audio WAS sent recently (within 10s) — so it's not just silence
     // If no audio is flowing either, the user is just quiet — leave the connection alone.
-    if (sinceCaption > CAPTION_WATCHDOG_MS && sinceAudio < 10000) {
+    if (sinceCaption > CONFIG.CAPTION_WATCHDOG_MS && sinceAudio < CONFIG.WATCHDOG_AUDIO_THRESHOLD) {
       console.warn(`[Offscreen] Watchdog: no captions for ${Math.round(sinceCaption/1000)}s but audio flowing, forcing reconnect`);
       sendStatus('reconnecting', 'Session stale, reconnecting...');
       reconnectWebSocket();
@@ -906,7 +921,7 @@ function startSessionRotation() {
     console.log(`[Offscreen] Session rotation: session alive for ${uptime}s, rotating proactively`);
     sendStatus('reconnecting', 'Rotating session...');
     reconnectWebSocket();
-  }, SESSION_ROTATE_MS);
+  }, CONFIG.SESSION_ROTATE_MS);
 }
 
 function scheduleSessionRotation(delayMs) {
@@ -977,7 +992,7 @@ function _onDeviceChange() {
   deviceChangeDebounceTimer = setTimeout(() => {
     deviceChangeDebounceTimer = null;
     _handleDeviceChange();
-  }, DEVICE_CHANGE_DEBOUNCE_MS);
+  }, CONFIG.DEVICE_CHANGE_DEBOUNCE_MS);
 }
 
 async function _handleDeviceChange() {
@@ -1070,7 +1085,6 @@ async function _rebuildAudioChain() {
 
 // ==================== HELPERS ====================
 let sendMessageFailCount = 0;
-const MAX_SEND_FAILURES = 5;
 
 function sendCaption(text, isFinal, originalText) {
   if (text) resetCaptionWatchdog();
@@ -1084,10 +1098,10 @@ function sendCaption(text, isFinal, originalText) {
   }
   chrome.runtime.sendMessage(msg).catch(err => {
     sendMessageFailCount++;
-    if (sendMessageFailCount <= MAX_SEND_FAILURES) {
-      console.warn(`[Offscreen] sendCaption failed (${sendMessageFailCount}/${MAX_SEND_FAILURES}):`, err.message);
+    if (sendMessageFailCount <= CONFIG.MAX_SEND_FAILURES) {
+      console.warn(`[Offscreen] sendCaption failed (${sendMessageFailCount}/${CONFIG.MAX_SEND_FAILURES}):`, err.message);
     }
-    if (sendMessageFailCount >= MAX_SEND_FAILURES && isCapturing) {
+    if (sendMessageFailCount >= CONFIG.MAX_SEND_FAILURES && isCapturing) {
       console.error('[Offscreen] Too many send failures, triggering reconnect');
       reconnectWebSocket();
     }
