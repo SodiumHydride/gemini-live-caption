@@ -277,8 +277,9 @@
     if (!text) return;
 
     if (isFinal) {
-      if (text === lastFinalized) return;
-      if (currentPartialEl && currentPartialEl.parentNode === track && text === currentPartialText) {
+      // Dedup: skip if already finalized this text (trim to handle whitespace differences)
+      if (text.trim() === lastFinalized.trim()) return;
+      if (currentPartialEl && currentPartialEl.parentNode === track && text.trim() === currentPartialText.trim()) {
         lastFinalized = text;
         currentPartialEl = null;
         currentPartialText = '';

@@ -534,11 +534,11 @@
     if (!text) return;
 
     if (isFinal) {
-      // Dedup: skip if already finalized this exact text
-      if (text === lastFinalized) return;
+      // Dedup: skip if already finalized this text (trim to handle whitespace differences)
+      if (text.trim() === lastFinalized.trim()) return;
 
       // If this finalized text matches what's showing as partial → just mark finalized
-      if (currentPartialEl && currentPartialEl.parentNode === track && text === currentPartialText) {
+      if (currentPartialEl && currentPartialEl.parentNode === track && text.trim() === currentPartialText.trim()) {
         lastFinalized = text;
         currentPartialEl = null;
         currentPartialText = '';

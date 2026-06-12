@@ -582,9 +582,10 @@ function handleGeminiResponse(msg) {
       }
 
       // Also check modelTurn text parts (fallback)
+      // Use endsWith() for more precise dedup — includes() can miss partial overlaps
       if (sc.modelTurn && sc.modelTurn.parts) {
         for (const part of sc.modelTurn.parts) {
-          if (part.text && !partialText.includes(part.text)) {
+          if (part.text && !partialText.endsWith(part.text)) {
             partialText += part.text;
           }
         }
