@@ -616,159 +616,174 @@ function tryFlushAtPunctuation() {
 }
 
 function handleGeminiResponse(msg) {
+  // Handle non-serverContent messages first
+  if (msg.setupComplete) {
+    dbg('Gemini setup complete');
+    sendStatus('capturing', 'Connected to Gemini 3.5 Live Translate');
+    return;
+  }
 
-    // Setup complete confirmation
-    if (msg.setupComplete) {
-      dbg('Gemini setup complete');
-      sendStatus('capturing', 'Connected to Gemini 3.5 Live Translate');
-      return;
+  if (msg.sessionResumptionUpdate) {
+    handleSessionResumption(msg.sessionResumptionUpdate);
+    return;
+  }
+
+  if (msg.error) {
+    handleServerError(msg.error);
+    return;
+  }
+
+  if (msg.goAway) {
+    handleGoAway(msg.goAway);
+    return;
+  }
+
+  // Handle server content
+  if (msg.serverContent) {
+    handleServerContent(msg.serverContent);
+  }
+}
+
+function handleSessionResumption(update) {
+  const handle = update.newHandle;
+  if (handle) {
+    resumptionHandle = handle;
+    dbg(`Session resumption handle saved: ${handle.substring(0, 20)}...`);
+  }
+}
+
+function handleServerError(error) {
+  console.error('[Offscreen] Server error:', error);
+  sendStatus('error', `Server error: ${error.message || JSON.stringify(error)}`);
+}
+
+function handleGoAway(goAway) {
+  const timeLeft = goAway.timeLeft;
+  console.warn(`[Offscreen] GoAway received, time left: ${timeLeft}`);
+  if (!isCapturing) return;
+
+  if (timeLeft && parseDuration(timeLeft) > 5000) {
+    scheduleSessionRotation(parseDuration(timeLeft) - 2000);
+    console.log(`[Offscreen] Scheduled rotation in ${parseDuration(timeLeft) - 2000}ms`);
+  } else {
+    sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
+    reconnectWebSocket();
+  }
+}
+
+function handleServerContent(sc) {
+  logSignals(sc);
+
+  if (sc.interrupted) {
+    handleInterrupted();
+    return;
+  }
+
+  handleOutputTranscription(sc);
+  handleInputTranscription(sc);
+  handleModelTurn(sc);
+  handleSegmentation(sc);
+  handleTurnComplete(sc);
+  handleBufferOverflow();
+  handleGenerationComplete(sc);
+  handleWatchdogReset(sc);
+}
+
+function logSignals(sc) {
+  const signals = [];
+  if (sc.turnComplete) signals.push('turnComplete');
+  if (sc.generationComplete) signals.push('generationComplete');
+  if (sc.waitingForInput) signals.push('waitingForInput');
+  if (sc.interrupted) signals.push('interrupted');
+  if (sc.outputTranscription?.finished) signals.push('outFinished');
+  if (sc.outputTranscription?.text) signals.push(`outText(${sc.outputTranscription.text.length})`);
+  if (sc.inputTranscription?.text) signals.push(`inText(${sc.inputTranscription.text.length})`);
+  if (signals.length) dbg('Signals:', signals.join(', '));
+}
+
+function handleInterrupted() {
+  dbg('Generation interrupted');
+  outputProcessor.reset();
+  sendCaption('', false);
+}
+
+function handleOutputTranscription(sc) {
+  if (!sc.outputTranscription || !sc.outputTranscription.text) return;
+
+  if (!lastCaptionTime || (Date.now() - lastCaptionTime > 30000)) {
+    dbg(`First caption after ${(Date.now() - (sessionStartTime || Date.now())) / 1000}s gap`);
+  }
+
+  const result = outputProcessor.process(sc.outputTranscription.text);
+  if (!result.changed) return;
+
+  const fullText = outputProcessor.getFullText();
+  resetCaptionWatchdog();
+  if (fullText.trim()) sendCaption(fullText.trim(), false);
+
+  // Restart gap timer on each text arrival
+  if (gapFlushTimer) clearTimeout(gapFlushTimer);
+  gapFlushTimer = setTimeout(() => {
+    gapFlushTimer = null;
+    const currentText = outputProcessor.getFullText();
+    if (!tryFlushAtPunctuation() && currentText.trim().length >= MIN_FLUSH_CHARS) {
+      outputProcessor.flush();
+      sendCaption(currentText.trim(), true);
     }
+  }, GAP_FLUSH_MS);
+}
 
-    // Session resumption handle — save for reconnection (valid 2 hours)
-    if (msg.sessionResumptionUpdate) {
-      const handle = msg.sessionResumptionUpdate.newHandle;
-      if (handle) {
-        resumptionHandle = handle;
-        dbg(`Session resumption handle saved: ${handle.substring(0, 20)}...`);
-      }
-      return;
+function handleInputTranscription(sc) {
+  if (!sc.inputTranscription || !sc.inputTranscription.text) return;
+  inputProcessor.process(sc.inputTranscription.text);
+  resetCaptionWatchdog();
+}
+
+function handleModelTurn(sc) {
+  if (!sc.modelTurn || !sc.modelTurn.parts) return;
+
+  for (const part of sc.modelTurn.parts) {
+    if (part.text && !outputProcessor.getFullText().endsWith(part.text)) {
+      outputProcessor.process(outputProcessor.getFullText() + part.text);
     }
+  }
+  if (outputProcessor.getFullText().trim()) {
+    sendCaption(outputProcessor.getFullText().trim(), false);
+  }
+}
 
-    // Error response from server
-    if (msg.error) {
-      console.error('[Offscreen] Server error:', msg.error);
-      sendStatus('error', `Server error: ${msg.error.message || JSON.stringify(msg.error)}`);
-      return;
-    }
+function handleSegmentation(sc) {
+  tryFlushAtPunctuation();
+}
 
-    // GoAway — server is about to disconnect. Parse timeLeft for smart scheduling.
-    // If timeLeft is small (< 5s), reconnect immediately.
-    // If timeLeft is larger, schedule rotation to minimize caption gap.
-    if (msg.goAway) {
-      const timeLeft = msg.goAway.timeLeft;
-      console.warn(`[Offscreen] GoAway received, time left: ${timeLeft}`);
-      if (isCapturing) {
-        if (timeLeft && parseDuration(timeLeft) > 5000) {
-          // Enough time — schedule rotation before disconnect
-          scheduleSessionRotation(parseDuration(timeLeft) - 2000);
-          console.log(`[Offscreen] Scheduled rotation in ${parseDuration(timeLeft) - 2000}ms`);
-        } else {
-          // Imminent disconnect — reconnect now
-          sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
-          reconnectWebSocket();
-        }
-      }
-      return;
-    }
+function handleTurnComplete(sc) {
+  if (!sc.outputTranscription?.finished && !sc.turnComplete && !sc.waitingForInput) return;
 
-    // Server content
-    if (msg.serverContent) {
-      const sc = msg.serverContent;
+  const currentText = outputProcessor.getFullText();
+  if (currentText.trim().length < MIN_FLUSH_CHARS) return;
 
-      // Debug: log which signals are present
-      const signals = [];
-      if (sc.turnComplete) signals.push('turnComplete');
-      if (sc.generationComplete) signals.push('generationComplete');
-      if (sc.waitingForInput) signals.push('waitingForInput');
-      if (sc.interrupted) signals.push('interrupted');
-      if (sc.outputTranscription?.finished) signals.push('outFinished');
-      if (sc.outputTranscription?.text) signals.push(`outText(${sc.outputTranscription.text.length})`);
-      if (sc.inputTranscription?.text) signals.push(`inText(${sc.inputTranscription.text.length})`);
-      if (signals.length) dbg('Signals:', signals.join(', '));
+  if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
+  const flushed = outputProcessor.flush();
+  sendCaption(flushed.trim(), true);
+}
 
-      // Interrupted — clear buffer immediately
-      if (sc.interrupted) {
-        dbg('Generation interrupted');
-        outputProcessor.reset();
-        sendCaption('', false);
-        return;
-      }
+function handleBufferOverflow() {
+  const fullText = outputProcessor.getFullText();
+  if (fullText.length <= 150) return;
 
-      // Process output transcription (cumulative format)
-      if (sc.outputTranscription && sc.outputTranscription.text) {
-        if (!lastCaptionTime || (Date.now() - lastCaptionTime > 30000)) {
-          dbg(`First caption after ${(Date.now() - (sessionStartTime || Date.now())) / 1000}s gap`);
-        }
+  console.warn('[Offscreen] Buffer overflow, force-flushing 150+ chars');
+  const flushed = outputProcessor.flush();
+  sendCaption(flushed.trim(), true);
+}
 
-        // Process cumulative text with revision detection
-        const result = outputProcessor.process(sc.outputTranscription.text);
-        if (result.changed) {
-          const fullText = outputProcessor.getFullText();
-          resetCaptionWatchdog();
-          // Show as live preview (isFinal=false)
-          if (fullText.trim()) sendCaption(fullText.trim(), false);
+function handleGenerationComplete(sc) {
+  if (sc.generationComplete) dbg('Generation complete');
+}
 
-          // Restart gap timer on each text arrival
-          if (gapFlushTimer) clearTimeout(gapFlushTimer);
-          gapFlushTimer = setTimeout(() => {
-            gapFlushTimer = null;
-            const currentText = outputProcessor.getFullText();
-            // Gap flush: try punctuation first, else flush only if long enough
-            if (!tryFlushAtPunctuation() && currentText.trim().length >= MIN_FLUSH_CHARS) {
-              outputProcessor.flush();
-              sendCaption(currentText.trim(), true);
-            }
-          }, GAP_FLUSH_MS);
-        }
-      }
-
-      // Process input transcription (cumulative format) for bilingual mode
-      if (sc.inputTranscription && sc.inputTranscription.text) {
-        inputProcessor.process(sc.inputTranscription.text);
-        resetCaptionWatchdog();
-      }
-
-      // Also check modelTurn text parts (fallback)
-      // Use endsWith() for more precise dedup — includes() can miss partial overlaps
-      if (sc.modelTurn && sc.modelTurn.parts) {
-        for (const part of sc.modelTurn.parts) {
-          if (part.text && !outputProcessor.getFullText().endsWith(part.text)) {
-            // Append modelTurn text to processor
-            outputProcessor.process(outputProcessor.getFullText() + part.text);
-          }
-        }
-        if (outputProcessor.getFullText().trim()) sendCaption(outputProcessor.getFullText().trim(), false);
-      }
-
-      // === Segmentation: breath-based flush at punctuation ===
-      // Cut at the first punctuation after MIN_FLUSH_CHARS ("气口").
-      // Short fragments are NEVER flushed — they accumulate into the next segment.
-      // This prevents "嗯。" / "首先" from becoming standalone subtitles.
-
-      // Try flush on any model signal — but only if buffer is long enough
-      tryFlushAtPunctuation();
-
-      // Model turn/segment signals — only flush if buffer >= MIN_FLUSH_CHARS
-      // Short buffers are left for the gap timer to accumulate further
-      if (sc.outputTranscription?.finished || sc.turnComplete || sc.waitingForInput) {
-        const currentText = outputProcessor.getFullText();
-        if (currentText.trim().length >= MIN_FLUSH_CHARS) {
-          // Enough text — flush even without punctuation
-          if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-          const flushed = outputProcessor.flush();
-          sendCaption(flushed.trim(), true);
-        }
-        // else: too short, keep accumulating (gap timer will handle it)
-      }
-
-      // Fallback: safety valve for very long turns without any signal or punctuation
-      const fullText = outputProcessor.getFullText();
-      if (fullText.length > 150) {
-        console.warn('[Offscreen] Buffer overflow, force-flushing 150+ chars');
-        const flushed = outputProcessor.flush();
-        sendCaption(flushed.trim(), true);
-      }
-
-      // Generation complete — log only
-      if (sc.generationComplete) {
-        dbg('Generation complete');
-      }
-
-      // Input transcription — connection is alive, reset watchdog
-      if (sc.inputTranscription && sc.inputTranscription.text) {
-        resetCaptionWatchdog();
-      }
-    }
+function handleWatchdogReset(sc) {
+  if (sc.inputTranscription && sc.inputTranscription.text) {
+    resetCaptionWatchdog();
+  }
 }
 
 // ==================== RECONNECTION ====================
