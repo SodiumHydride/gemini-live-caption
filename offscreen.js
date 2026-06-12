@@ -483,8 +483,110 @@ function arrayBufferToBase64(buffer) {
 }
 
 // ==================== RESPONSE HANDLING ====================
-let partialText = '';
-let partialInputText = '';  // Input transcription buffer (original language)
+// TranscriptionProcessor: handles cumulative output from Gemini Live API
+// with revision detection and stability buffering
+class TranscriptionProcessor {
+  constructor(options = {}) {
+    this.STABILITY_THRESHOLD = options.stabilityThreshold || 0.8;
+    this.BUFFER_KEEP = options.bufferKeep || 20;
+    this.reset();
+  }
+
+  reset() {
+    this.lastRawText = '';
+    this.confirmedText = '';
+    this.pendingBuffer = '';
+    this.revisionCount = 0;
+  }
+
+  // Process new cumulative transcription text
+  // Returns: { text: string, changed: boolean, isRevision: boolean }
+  process(newFullText) {
+    if (!newFullText) return { text: this.confirmedText, changed: false, isRevision: false };
+
+    // Exact duplicate
+    if (newFullText === this.lastRawText) {
+      return { text: this.confirmedText, changed: false, isRevision: false };
+    }
+
+    const prevText = this.lastRawText;
+    this.lastRawText = newFullText;
+
+    // Detect if this is a revision (modification of previous text) or append
+    const isRevision = this._detectRevision(prevText, newFullText);
+
+    if (isRevision) {
+      return this._handleRevision(prevText, newFullText);
+    } else {
+      return this._handleAppend(prevText, newFullText);
+    }
+  }
+
+  _detectRevision(prev, curr) {
+    if (!prev) return false;
+    // If current text doesn't start with previous text, it's a revision
+    return !curr.startsWith(prev);
+  }
+
+  _handleRevision(prev, curr) {
+    this.revisionCount++;
+
+    // Find first difference position
+    const minLen = Math.min(prev.length, curr.length);
+    let diffPos = 0;
+    while (diffPos < minLen && prev[diffPos] === curr[diffPos]) {
+      diffPos++;
+    }
+
+    // Keep confirmed text up to diff position
+    this.confirmedText = curr.substring(0, diffPos);
+    // Put remaining into pending buffer
+    this.pendingBuffer = curr.substring(diffPos);
+
+    dbg(`[TranscriptionProcessor] Revision detected at pos ${diffPos}, total revisions: ${this.revisionCount}`);
+
+    return { text: this.confirmedText + this.pendingBuffer, changed: true, isRevision: true };
+  }
+
+  _handleAppend(prev, curr) {
+    // Extract delta (new text after previous)
+    const delta = curr.substring(prev.length);
+    this.pendingBuffer += delta;
+
+    // If buffer is long enough, confirm the front part
+    if (this.pendingBuffer.length > this.BUFFER_KEEP * 2) {
+      const toConfirm = this.pendingBuffer.substring(0, this.pendingBuffer.length - this.BUFFER_KEEP);
+      this.confirmedText += toConfirm;
+      this.pendingBuffer = this.pendingBuffer.substring(this.pendingBuffer.length - this.BUFFER_KEEP);
+    }
+
+    return { text: this.confirmedText + this.pendingBuffer, changed: true, isRevision: false };
+  }
+
+  // Force confirm all pending text (called on turnComplete, punctuation flush, etc.)
+  flush() {
+    this.confirmedText += this.pendingBuffer;
+    this.pendingBuffer = '';
+    return this.confirmedText;
+  }
+
+  getFullText() {
+    return this.confirmedText + this.pendingBuffer;
+  }
+
+  getStats() {
+    return {
+      revisionCount: this.revisionCount,
+      confirmedLength: this.confirmedText.length,
+      pendingLength: this.pendingBuffer.length
+    };
+  }
+}
+
+// Create processor instances
+const outputProcessor = new TranscriptionProcessor();
+const inputProcessor = new TranscriptionProcessor({ bufferKeep: 10 });
+
 let bilingualMode = false;  // Controlled by settings
 let gapFlushTimer = null;
 const GAP_FLUSH_MS = 700;   // Flush after 700ms of no new text (for talk-show/news)
@@ -554,42 +656,55 @@ function handleGeminiResponse(msg) {
       // Interrupted — clear buffer immediately
       if (sc.interrupted) {
         dbg('Generation interrupted');
-        partialText = '';
+        outputProcessor.reset();
         sendCaption('', false);
         return;
       }
 
-      // Accumulate output transcription text into buffer
+      // Process output transcription (cumulative format)
       if (sc.outputTranscription && sc.outputTranscription.text) {
         if (!lastCaptionTime || (Date.now() - lastCaptionTime > 30000)) {
           dbg(`First caption after ${(Date.now() - (sessionStartTime || Date.now())) / 1000}s gap`);
         }
-        partialText += sc.outputTranscription.text;
-        resetCaptionWatchdog(); // Output arriving = session is alive
-        // Show as live preview (isFinal=false)
-        if (partialText.trim()) sendCaption(partialText.trim(), false);
 
-        // Restart gap timer on each text arrival
-        if (gapFlushTimer) clearTimeout(gapFlushTimer);
-        gapFlushTimer = setTimeout(() => {
-          gapFlushTimer = null;
-          // Gap flush: try punctuation first, else flush only if long enough
-          if (!tryFlushAtPunctuation() && partialText.trim().length >= MIN_FLUSH_CHARS) {
-            sendCaption(partialText.trim(), true);
-            partialText = '';
-          }
-        }, GAP_FLUSH_MS);
+        // Process cumulative text with revision detection
+        const result = outputProcessor.process(sc.outputTranscription.text);
+        if (result.changed) {
+          const fullText = outputProcessor.getFullText();
+          resetCaptionWatchdog();
+          // Show as live preview (isFinal=false)
+          if (fullText.trim()) sendCaption(fullText.trim(), false);
+
+          // Restart gap timer on each text arrival
+          if (gapFlushTimer) clearTimeout(gapFlushTimer);
+          gapFlushTimer = setTimeout(() => {
+            gapFlushTimer = null;
+            const currentText = outputProcessor.getFullText();
+            // Gap flush: try punctuation first, else flush only if long enough
+            if (!tryFlushAtPunctuation() && currentText.trim().length >= MIN_FLUSH_CHARS) {
+              outputProcessor.flush();
+              sendCaption(currentText.trim(), true);
+            }
+          }, GAP_FLUSH_MS);
+        }
+      }
+
+      // Process input transcription (cumulative format) for bilingual mode
+      if (sc.inputTranscription && sc.inputTranscription.text) {
+        inputProcessor.process(sc.inputTranscription.text);
+        resetCaptionWatchdog();
       }
 
       // Also check modelTurn text parts (fallback)
       // Use endsWith() for more precise dedup — includes() can miss partial overlaps
       if (sc.modelTurn && sc.modelTurn.parts) {
         for (const part of sc.modelTurn.parts) {
-          if (part.text && !partialText.endsWith(part.text)) {
-            partialText += part.text;
+          if (part.text && !outputProcessor.getFullText().endsWith(part.text)) {
+            // Append modelTurn text to processor
+            outputProcessor.process(outputProcessor.getFullText() + part.text);
           }
         }
-        if (partialText.trim()) sendCaption(partialText.trim(), false);
+        if (outputProcessor.getFullText().trim()) sendCaption(outputProcessor.getFullText().trim(), false);
       }
 
       // === Segmentation: breath-based flush at punctuation ===
@@ -598,15 +713,20 @@ function handleGeminiResponse(msg) {
       // This prevents "嗯。" / "首先" from becoming standalone subtitles.
 
       const tryFlushAtPunctuation = () => {
-        if (partialText.length < MIN_FLUSH_CHARS) return false; // Too short, keep accumulating
+        const currentText = outputProcessor.getFullText();
+        if (currentText.length < MIN_FLUSH_CHARS) return false; // Too short, keep accumulating
         const ends = /[。！？.!?，,]/g;
         let m;
-        while ((m = ends.exec(partialText)) !== null) {
+        while ((m = ends.exec(currentText)) !== null) {
           if (m.index >= MIN_FLUSH_CHARS - 1) {
             // Found punctuation after minimum chars — cut here
             if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-            sendCaption(partialText.substring(0, m.index + 1).trim(), true);
-            partialText = partialText.substring(m.index + 1);
+            const toSend = currentText.substring(0, m.index + 1).trim();
+            const remaining = currentText.substring(m.index + 1);
+            // Reset processor with remaining text
+            outputProcessor.reset();
+            if (remaining) outputProcessor.process(remaining);
+            sendCaption(toSend, true);
             return true;
           }
         }
@@ -619,20 +739,22 @@ function handleGeminiResponse(msg) {
       // Model turn/segment signals — only flush if buffer >= MIN_FLUSH_CHARS
       // Short buffers are left for the gap timer to accumulate further
       if (sc.outputTranscription?.finished || sc.turnComplete || sc.waitingForInput) {
-        if (partialText.trim().length >= MIN_FLUSH_CHARS) {
+        const currentText = outputProcessor.getFullText();
+        if (currentText.trim().length >= MIN_FLUSH_CHARS) {
           // Enough text — flush even without punctuation
           if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-          sendCaption(partialText.trim(), true);
-          partialText = '';
+          const flushed = outputProcessor.flush();
+          sendCaption(flushed.trim(), true);
         }
         // else: too short, keep accumulating (gap timer will handle it)
       }
 
       // Fallback: safety valve for very long turns without any signal or punctuation
-      if (partialText.length > 150) {
+      const fullText = outputProcessor.getFullText();
+      if (fullText.length > 150) {
         console.warn('[Offscreen] Buffer overflow, force-flushing 150+ chars');
-        sendCaption(partialText.trim(), true);
-        partialText = '';
+        const flushed = outputProcessor.flush();
+        sendCaption(flushed.trim(), true);
       }
 
       // Generation complete — log only
@@ -929,12 +1051,6 @@ async function _rebuildAudioChain() {
 }
 
 // ==================== HELPERS ====================
-function consumeInputText() {
-  const text = partialInputText.trim();
-  partialInputText = '';
-  return text;
-}
-
 function sendCaption(text, isFinal, originalText) {
   if (text) resetCaptionWatchdog();
   const msg = {
@@ -943,7 +1059,8 @@ function sendCaption(text, isFinal, originalText) {
     isFinal,
   };
   if (bilingualMode) {
-    msg.original = originalText || consumeInputText();
+    // Get original text from input processor (cumulative format)
+    msg.original = originalText || inputProcessor.flush();
   }
   chrome.runtime.sendMessage(msg).catch(() => {});
 }
