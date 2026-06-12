@@ -588,28 +588,37 @@
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
       if (capturing) {
-        capturing = false;
-        // Fade out all lines
-        for (const child of Array.from(track.children)) {
-          child.style.opacity = '0';
-          child.style.maxHeight = '0';
-          child.style.padding = '0 1em';
-        }
-        setTimeout(() => {
-          if (!capturing) {
-            while (track.firstChild) track.removeChild(track.firstChild);
-            lineCount = 0;
-            viewportLocked = false;
-            linesEl.style.height = '';
-            track.style.transform = 'translateY(0)';
-            linesEl.style.display = 'none';
-            placeholder.classList.add('show');
-            currentPartialEl = null;
-            currentPartialText = '';
-          }
-        }, 300);
+        fadeOutAndClear();
       }
     }, 12000);
+  }
+
+  // Fade out all lines and clear track after animation
+  function fadeOutAndClear() {
+    capturing = false;
+    for (const child of Array.from(track.children)) {
+      child.style.opacity = '0';
+      child.style.maxHeight = '0';
+      child.style.padding = '0 1em';
+    }
+    setTimeout(() => {
+      if (!capturing) {
+        clearTrackState();
+      }
+    }, 300);
+  }
+
+  // Clear track DOM and reset state
+  function clearTrackState() {
+    while (track.firstChild) track.removeChild(track.firstChild);
+    lineCount = 0;
+    viewportLocked = false;
+    linesEl.style.height = '';
+    track.style.transform = 'translateY(0)';
+    linesEl.style.display = 'none';
+    placeholder.classList.add('show');
+    currentPartialEl = null;
+    currentPartialText = '';
   }
 
   // ==================== HISTORY PANEL ====================
@@ -652,25 +661,7 @@
       clearTimeout(fadeTimer);
       fadeTimer = setTimeout(() => {
         if (capturing) {
-          capturing = false;
-          for (const child of Array.from(track.children)) {
-            child.style.opacity = '0';
-            child.style.maxHeight = '0';
-            child.style.padding = '0 1em';
-          }
-          setTimeout(() => {
-            if (!capturing) {
-              while (track.firstChild) track.removeChild(track.firstChild);
-              lineCount = 0;
-              viewportLocked = false;
-              linesEl.style.height = '';
-              track.style.transform = 'translateY(0)';
-              linesEl.style.display = 'none';
-              placeholder.classList.add('show');
-              currentPartialEl = null;
-              currentPartialText = '';
-            }
-          }, 300);
+          fadeOutAndClear();
         }
       }, 12000);
     }
@@ -763,23 +754,7 @@
   // ==================== CLEAR ====================
   function clearCaptions() {
     clearTimeout(fadeTimer);
-    for (const child of Array.from(track.children)) {
-      child.style.opacity = '0';
-      child.style.maxHeight = '0';
-      child.style.padding = '0 1em';
-    }
-    setTimeout(() => {
-      while (track.firstChild) track.removeChild(track.firstChild);
-      lineCount = 0;
-      viewportLocked = false;
-      linesEl.style.height = '';
-      track.style.transform = 'translateY(0)';
-      linesEl.style.display = 'none';
-      placeholder.classList.add('show');
-    }, 300);
-    capturing = false;
-    currentPartialEl = null;
-    currentPartialText = '';
+    fadeOutAndClear();
   }
 
   // ==================== STATUS INDICATOR ====================

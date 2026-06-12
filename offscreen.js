@@ -595,6 +595,26 @@ let gapFlushTimer = null;
 const GAP_FLUSH_MS = 700;   // Flush after 700ms of no new text (for talk-show/news)
 const MIN_FLUSH_CHARS = 10; // Minimum chars before punctuation-based flush kicks in
 
+// Punctuation-based segmentation: flush at first punctuation after MIN_FLUSH_CHARS
+function tryFlushAtPunctuation() {
+  const currentText = outputProcessor.getFullText();
+  if (currentText.length < MIN_FLUSH_CHARS) return false;
+  const ends = /[。！？.!?，,]/g;
+  let m;
+  while ((m = ends.exec(currentText)) !== null) {
+    if (m.index >= MIN_FLUSH_CHARS - 1) {
+      if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
+      const toSend = currentText.substring(0, m.index + 1).trim();
+      const remaining = currentText.substring(m.index + 1);
+      outputProcessor.reset();
+      if (remaining) outputProcessor.process(remaining);
+      sendCaption(toSend, true);
+      return true;
+    }
+  }
+  return false;
+}
+
 function handleGeminiResponse(msg) {
 
     // Setup complete confirmation
@@ -714,27 +734,6 @@ function handleGeminiResponse(msg) {
       // Cut at the first punctuation after MIN_FLUSH_CHARS ("气口").
       // Short fragments are NEVER flushed — they accumulate into the next segment.
       // This prevents "嗯。" / "首先" from becoming standalone subtitles.
-
-      const tryFlushAtPunctuation = () => {
-        const currentText = outputProcessor.getFullText();
-        if (currentText.length < MIN_FLUSH_CHARS) return false; // Too short, keep accumulating
-        const ends = /[。！？.!?，,]/g;
-        let m;
-        while ((m = ends.exec(currentText)) !== null) {
-          if (m.index >= MIN_FLUSH_CHARS - 1) {
-            // Found punctuation after minimum chars — cut here
-            if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-            const toSend = currentText.substring(0, m.index + 1).trim();
-            const remaining = currentText.substring(m.index + 1);
-            // Reset processor with remaining text
-            outputProcessor.reset();
-            if (remaining) outputProcessor.process(remaining);
-            sendCaption(toSend, true);
-            return true;
-          }
-        }
-        return false; // No punctuation found after MIN_FLUSH_CHARS
-      };
 
       // Try flush on any model signal — but only if buffer is long enough
       tryFlushAtPunctuation();
