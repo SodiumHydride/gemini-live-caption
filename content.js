@@ -510,14 +510,10 @@
       track.style.transform = `translateY(-${lineH}px)`;
 
       // After animation, remove old line and reset track position
-      // Use both transitionend and setTimeout fallback to handle edge cases
-      let cleaned = false;
+      const oldLine = track.firstChild;
       function cleanupTransition() {
-        if (cleaned) return;
-        cleaned = true;
-        track.removeEventListener('transitionend', onTransitionEnd);
-        if (track.firstChild && track.firstChild !== el) {
-          track.removeChild(track.firstChild);
+        if (oldLine && oldLine.parentNode === track) {
+          track.removeChild(oldLine);
         }
         lineCount--;
         track.style.transition = 'none';
@@ -525,13 +521,8 @@
         track.offsetHeight; // force reflow
         track.style.transition = '';
       }
-      function onTransitionEnd(event) {
-        if (event.propertyName !== 'transform') return;
-        cleanupTransition();
-      }
-      track.addEventListener('transitionend', onTransitionEnd, { once: true });
-      // Fallback: if transitionend doesn't fire within 500ms, force cleanup
-      setTimeout(cleanupTransition, 500);
+      // Wait for transition to complete, then cleanup
+      setTimeout(cleanupTransition, 350);
     }
   }
 
