@@ -510,9 +510,12 @@
       track.style.transform = `translateY(-${lineH}px)`;
 
       // After animation, remove old line and reset track position
-      track.addEventListener('transitionend', function handler(event) {
-        if (event.propertyName !== 'transform') return;
-        track.removeEventListener('transitionend', handler);
+      // Use both transitionend and setTimeout fallback to handle edge cases
+      let cleaned = false;
+      function cleanupTransition() {
+        if (cleaned) return;
+        cleaned = true;
+        track.removeEventListener('transitionend', onTransitionEnd);
         if (track.firstChild && track.firstChild !== el) {
           track.removeChild(track.firstChild);
         }
@@ -521,7 +524,14 @@
         track.style.transform = 'translateY(0)';
         track.offsetHeight; // force reflow
         track.style.transition = '';
-      }, { once: true });
+      }
+      function onTransitionEnd(event) {
+        if (event.propertyName !== 'transform') return;
+        cleanupTransition();
+      }
+      track.addEventListener('transitionend', onTransitionEnd, { once: true });
+      // Fallback: if transitionend doesn't fire within 500ms, force cleanup
+      setTimeout(cleanupTransition, 500);
     }
   }
 
@@ -992,7 +1002,9 @@
 
       // Listen for messages FROM PiP window (sent via window.opener.postMessage).
       // Must listen on `window` (the host page), not on `pipWindow`.
+      // Verify message source to prevent malicious page injection.
       function onPiPMessage(event) {
+        if (event.source !== pipWindow) return;
         if (!event.data || !event.data.type) return;
         if (event.data.type === 'PIP_CLOSED') {
           chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});

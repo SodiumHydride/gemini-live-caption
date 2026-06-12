@@ -367,6 +367,10 @@ async function connectWebSocket() {
     setTimeout(() => {
       if (gen !== wsGeneration) return;
       if (!setupComplete) {
+        // Close WebSocket on timeout to prevent resource leak
+        if (ws.readyState !== WebSocket.CLOSED) {
+          ws.close();
+        }
         reject(new Error('WebSocket connection timeout'));
       }
     }, 15000);
@@ -1065,6 +1069,9 @@ async function _rebuildAudioChain() {
 }
 
 // ==================== HELPERS ====================
+let sendMessageFailCount = 0;
+const MAX_SEND_FAILURES = 5;
+
 function sendCaption(text, isFinal, originalText) {
   if (text) resetCaptionWatchdog();
   const msg = {
@@ -1073,11 +1080,18 @@ function sendCaption(text, isFinal, originalText) {
     isFinal,
   };
   if (bilingualMode) {
-    // Get original text from input processor
-    // Only flush on final to preserve stability buffer during live preview
     msg.original = originalText || (isFinal ? inputProcessor.flush() : inputProcessor.getFullText());
   }
-  chrome.runtime.sendMessage(msg).catch(() => {});
+  chrome.runtime.sendMessage(msg).catch(err => {
+    sendMessageFailCount++;
+    if (sendMessageFailCount <= MAX_SEND_FAILURES) {
+      console.warn(`[Offscreen] sendCaption failed (${sendMessageFailCount}/${MAX_SEND_FAILURES}):`, err.message);
+    }
+    if (sendMessageFailCount >= MAX_SEND_FAILURES && isCapturing) {
+      console.error('[Offscreen] Too many send failures, triggering reconnect');
+      reconnectWebSocket();
+    }
+  });
 }
 
 function sendStatus(status, message) {
@@ -1085,7 +1099,9 @@ function sendStatus(status, message) {
     type: 'STATUS_UPDATE',
     status,
     message,
-  }).catch(() => {});
+  }).catch(err => {
+    console.warn('[Offscreen] sendStatus failed:', err.message);
+  });
 }
 
 dbg('Offscreen document loaded');
