@@ -240,12 +240,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // via chrome.runtime.sendMessage would cause content.js to receive
       // the message twice (once from tabs.sendMessage, once from runtime).
       if (activeTabId) {
+        const captionMsg = {
+          type: 'CAPTION_UPDATE',
+          text: msg.text,
+          isFinal: msg.isFinal,
+        };
+        // Pass through original text for bilingual mode
+        if (msg.original) {
+          captionMsg.original = msg.original;
+        }
         try {
-          await chrome.tabs.sendMessage(activeTabId, {
-            type: 'CAPTION_UPDATE',
-            text: msg.text,
-            isFinal: msg.isFinal,
-          });
+          await chrome.tabs.sendMessage(activeTabId, captionMsg);
         } catch (err) {
           // Content script lost — re-inject and retry
           console.warn('[SW] CAPTION_UPDATE delivery failed, re-injecting content script:', err.message);
@@ -254,11 +259,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             // Small delay to let content.js init() create the overlay
             await new Promise(r => setTimeout(r, 200));
             // Retry once after re-injection
-            await chrome.tabs.sendMessage(activeTabId, {
-              type: 'CAPTION_UPDATE',
-              text: msg.text,
-              isFinal: msg.isFinal,
-            });
+            await chrome.tabs.sendMessage(activeTabId, captionMsg);
           } catch (retryErr) {
             console.error('[SW] CAPTION_UPDATE retry also failed:', retryErr.message);
           }

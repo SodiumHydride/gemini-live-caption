@@ -405,6 +405,26 @@
     historyVisible = false;
     historyPanel.classList.remove('visible');
     if (historyOverlay) historyOverlay.classList.remove('visible');
+
+    // Restart fade timer after closing history panel
+    if (capturing) {
+      clearTimeout(fadeTimer);
+      fadeTimer = setTimeout(() => {
+        if (capturing) {
+          capturing = false;
+          for (const child of Array.from(track.children)) {
+            child.style.opacity = '0';
+            child.style.maxHeight = '0';
+          }
+          setTimeout(() => {
+            if (!capturing) {
+              clearTrack();
+              placeholder.classList.add('show');
+            }
+          }, 400);
+        }
+      }, FADE_TIMEOUT);
+    }
   }
 
   function renderHistory() {
