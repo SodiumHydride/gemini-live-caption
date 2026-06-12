@@ -9,9 +9,16 @@ Capture tab audio → stream to Gemini Live Translate → display translated cap
 ## Features
 
 - Real-time speech-to-text translation across 50+ languages
-- Floating caption overlay — drag, resize, customize font size and opacity
+- **Bilingual mode** — display original language alongside translation
+- Floating caption overlay — drag, resize, customize font size, color, and opacity
+- **Caption position presets** — 6 positions (top/bottom × left/center/right)
 - Picture-in-Picture window — keep captions visible when switching tabs
+- **Transcript history panel** — double-click to expand, scrollable history with timestamps
+- **SRT export** — download caption history as subtitle files
 - Automatic session management — handles Gemini's connection limits seamlessly
+- **Device change detection** — automatically rebuilds audio chain when switching output devices
+- **Connection status indicator** — visual feedback for connection state
+- **Debug logs** — export diagnostic logs without DevTools
 - Works on any website with audio: YouTube, Twitch, podcasts, video calls, etc.
 
 ## Quick Start
@@ -53,8 +60,11 @@ Capture tab audio → stream to Gemini Live Translate → display translated cap
 |---------|-------------|
 | API Key | Your Gemini API key |
 | Target Language | Language to translate captions into |
-| Font Size | Caption text size (default: 3.2vh) |
-| Background Opacity | Caption background darkness (default: 80%) |
+| Bilingual Mode | Show original language alongside translation |
+| Font Size | Caption text size (S/M/L) |
+| Background Opacity | Caption background darkness (default: 75%) |
+| Caption Position | Preset positions (top/bottom × left/center/right) |
+| Text Color | Caption text color (6 options) |
 | Audio Gain | Boost or reduce captured audio volume |
 | Noise Gate | Filter out background noise below this threshold |
 
