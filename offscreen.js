@@ -2,7 +2,7 @@
 // Runs in an offscreen document with full Web API access.
 
 const DEBUG = false;
-const dbg = (...args) => console.log('[Offscreen]', ...args);
+const dbg = DEBUG ? (...args) => console.log('[Offscreen]', ...args) : () => {};
 
 // ==================== DIAGNOSTIC LOG BUFFER ====================
 // Ring buffer storing recent log entries for debugging without DevTools.
@@ -160,6 +160,9 @@ async function startCapture(streamId, settings) {
     audioGain: settings.audioGain ?? 1.0,
     noiseGate: settings.noiseGate ?? 0,
   };
+
+  // Restore bilingualMode from settings
+  bilingualMode = settings.bilingualMode ?? false;
 
   if (!currentSettings.apiKey) {
     throw new Error('No API key configured. Please set your Gemini API key in the extension settings.');

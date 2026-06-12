@@ -509,7 +509,9 @@ async function startCapture(tabId) {
 
   try {
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
-    const settings = await chrome.storage.local.get(['apiKey', 'targetLanguage']);
+    const settings = await chrome.storage.local.get([
+      'apiKey', 'targetLanguage', 'audioGain', 'noiseGate', 'bilingualMode'
+    ]);
     await ensureOffscreenDocument();
 
     const response = await chrome.runtime.sendMessage({
@@ -518,6 +520,9 @@ async function startCapture(tabId) {
       settings: {
         apiKey: settings.apiKey || '',
         targetLanguage: settings.targetLanguage || 'zh-Hans',
+        audioGain: settings.audioGain ?? 1.0,
+        noiseGate: settings.noiseGate ?? 0,
+        bilingualMode: settings.bilingualMode ?? false,
       },
     });
 
