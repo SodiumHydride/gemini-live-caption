@@ -30,6 +30,8 @@ If you use a **free-tier Gemini API key**, Google's Terms of Service (effective 
 
 Users in the EEA/UK should be aware that Google's free API tier may not be available in their region per Google's terms. A paid API key may be required.
 
+**Age restriction:** Google's Gemini API Terms of Service require users to be 18 years or older. This extension must not be used as part of a service directed at individuals under 18.
+
 This extension does not control or influence Google's data handling policies. By using this extension, you agree to Google's [Terms of Service](https://ai.google.dev/terms).
 
 ## Third-Party Data Sharing

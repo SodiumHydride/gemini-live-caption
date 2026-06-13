@@ -111,6 +111,7 @@ This extension is a tool for real-time audio translation. The user is solely res
 - **Copyright:** Capturing audio from copyrighted content (streams, movies, music) may violate platform Terms of Service or applicable copyright laws. Ensure you have the right to capture and translate the audio you process through this extension.
 - **Privacy:** Do not use this extension to capture audio from private conversations without the consent of all parties involved. Laws regarding audio recording vary by jurisdiction.
 - **API usage:** This extension sends audio to Google's Gemini API. By using this extension, you agree to [Google's Terms of Service](https://ai.google.dev/terms). Free-tier API keys are subject to data usage policies that may include model training.
+- **Age restriction:** Users must be 18 or older. Google's Gemini API must not be used as part of a service directed at individuals under 18.
 - **No warranty:** This extension is provided "as is" without warranty of any kind. The developers are not responsible for any misuse, data loss, or legal consequences arising from the use of this extension.
 
 ## License
