@@ -24,6 +24,14 @@ The audio stream is sent to Google's Gemini Live Translate API via WebSocket for
 
 That's it. There is no secondary use, no profiling, no analytics.
 
+## Free API Key Notice
+
+If you use a **free-tier Gemini API key**, Google's Terms of Service (effective March 2026) state that your audio data may be used for model training and may be reviewed by human annotators. If this is a concern, use a paid API key, which has different data handling terms.
+
+Users in the EEA/UK should be aware that Google's free API tier may not be available in their region per Google's terms. A paid API key may be required.
+
+This extension does not control or influence Google's data handling policies. By using this extension, you agree to Google's [Terms of Service](https://ai.google.dev/terms).
+
 ## Third-Party Data Sharing
 
 Audio data is streamed to **Google** through the Gemini Live Translate API. Google's handling of that data is governed by their own privacy policy:

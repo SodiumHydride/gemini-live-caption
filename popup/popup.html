@@ -8,6 +8,21 @@
 </head>
 <body>
   <div class="popup-container">
+    <!-- Disclaimer (first use) -->
+    <div class="disclaimer" id="disclaimer" style="display:none">
+      <div class="disclaimer-icon">⚠️</div>
+      <div class="disclaimer-text">
+        <strong>Before you start</strong>
+        <p>This extension captures tab audio and sends it to Google for translation. By using it, you agree to <a href="https://ai.google.dev/terms" target="_blank">Google's Terms of Service</a>.</p>
+        <ul>
+          <li>Do not capture copyrighted content without permission</li>
+          <li>Do not record private conversations without consent</li>
+          <li>Free API keys: Google may use your data for model training</li>
+        </ul>
+      </div>
+      <button class="disclaimer-btn" id="acceptDisclaimer">I Understand</button>
+    </div>
+
     <!-- Header -->
     <header class="header">
       <div class="logo">

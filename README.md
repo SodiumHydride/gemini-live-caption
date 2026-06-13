@@ -101,7 +101,17 @@ The extension captures audio from the current tab, streams it to Gemini's Live T
 - Audio is streamed directly from your browser to Google's Gemini API. No intermediate servers.
 - Your API key is stored locally in Chrome's extension storage and never shared.
 - No analytics, tracking, or data collection by this extension.
+- **Free API key notice:** If you use a free Gemini API key, Google may use your audio data for model training and human review. See [Google's Terms of Service](https://ai.google.dev/terms). For privacy-sensitive use, consider using a paid API key.
 - **Note:** Audio data is processed by Google's Gemini API. Google's [Terms of Service](https://ai.google.dev/terms) and [Privacy Policy](https://policies.google.com/privacy) apply. Do not use with sensitive or confidential audio.
+
+## Disclaimer
+
+This extension is a tool for real-time audio translation. The user is solely responsible for how they use it.
+
+- **Copyright:** Capturing audio from copyrighted content (streams, movies, music) may violate platform Terms of Service or applicable copyright laws. Ensure you have the right to capture and translate the audio you process through this extension.
+- **Privacy:** Do not use this extension to capture audio from private conversations without the consent of all parties involved. Laws regarding audio recording vary by jurisdiction.
+- **API usage:** This extension sends audio to Google's Gemini API. By using this extension, you agree to [Google's Terms of Service](https://ai.google.dev/terms). Free-tier API keys are subject to data usage policies that may include model training.
+- **No warranty:** This extension is provided "as is" without warranty of any kind. The developers are not responsible for any misuse, data loss, or legal consequences arising from the use of this extension.
 
 ## License
 

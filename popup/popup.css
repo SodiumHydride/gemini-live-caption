@@ -772,6 +772,36 @@ kbd {
   outline-offset: 2px;
 }
 
+/* ── Disclaimer ──────────────────────────────────────────── */
+.disclaimer {
+  background: rgba(255, 152, 0, 0.08);
+  border: 1px solid rgba(255, 152, 0, 0.2);
+  border-radius: 10px;
+  padding: 14px;
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.disclaimer-icon { font-size: 20px; text-align: center; }
+.disclaimer-text { font-size: 12px; color: rgba(255,255,255,0.8); line-height: 1.5; }
+.disclaimer-text strong { color: #ffb74d; display: block; margin-bottom: 4px; font-size: 13px; }
+.disclaimer-text a { color: #4fc3f7; }
+.disclaimer-text ul { margin: 6px 0 0 16px; font-size: 11px; color: rgba(255,255,255,0.6); }
+.disclaimer-text li { margin-bottom: 2px; }
+.disclaimer-btn {
+  background: rgba(255, 152, 0, 0.15);
+  border: 1px solid rgba(255, 152, 0, 0.3);
+  color: #ffb74d;
+  padding: 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.2s;
+}
+.disclaimer-btn:hover { background: rgba(255, 152, 0, 0.25); }
+
 /* ── Reduced Motion ──────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

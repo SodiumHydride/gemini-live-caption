@@ -17,6 +17,20 @@ document.addEventListener('DOMContentLoaded', async () => {
   const noiseGateSlider = document.getElementById('noiseGate');
   const gateValue = document.getElementById('gateValue');
 
+  // ==================== DISCLAIMER (first use) ====================
+  const disclaimerEl = document.getElementById('disclaimer');
+  const acceptBtn = document.getElementById('acceptDisclaimer');
+  const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
+  if (!disclaimerAccepted && disclaimerEl) {
+    disclaimerEl.style.display = '';
+  }
+  if (acceptBtn) {
+    acceptBtn.addEventListener('click', () => {
+      chrome.storage.local.set({ disclaimerAccepted: true });
+      if (disclaimerEl) disclaimerEl.style.display = 'none';
+    });
+  }
+
   // ==================== LOAD SETTINGS ====================
   const settings = await chrome.storage.local.get([
     'apiKey', 'targetLanguage', 'fontSize', 'maxLines', 'bgOpacity', 'audioGain', 'noiseGate', 'captionPosition', 'textColor', 'bilingualMode'
