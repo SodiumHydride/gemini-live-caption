@@ -406,6 +406,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (msg.type === 'DISCLAIMER_ACCEPTED') {
+    if (!isFromPopup(sender)) return false;
+    (async () => {
+      await chrome.action.setBadgeText({ text: '' });
+    })();
+    return false;
+  }
+
   if (msg.type === 'EXPORT_LOGS') {
     if (!isFromPopup(sender)) return false;
     (async () => {
@@ -458,6 +466,21 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // ==================== CORE FUNCTIONS ====================
 
 async function toggleCapture(tabId) {
+  // Block capture until disclaimer is accepted
+  const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
+  if (!disclaimerAccepted) {
+    dbg('[SW] Disclaimer not accepted, blocking capture');
+    // Open popup so user can see and accept the disclaimer
+    try {
+      await chrome.action.openPopup();
+    } catch (e) {
+      // openPopup may fail without user gesture — show badge hint
+      await chrome.action.setBadgeText({ text: '!' });
+      await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
+    }
+    return;
+  }
+
   const { captureState = 'idle', activeTabId } = await chrome.storage.session.get(['captureState', 'activeTabId']);
 
   // Ignore if in transition
