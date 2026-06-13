@@ -28,7 +28,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     acceptBtn.addEventListener('click', () => {
       chrome.storage.local.set({ disclaimerAccepted: true });
       if (disclaimerEl) disclaimerEl.style.display = 'none';
+      // Clear the "!" badge that may have been set by service worker
+      chrome.runtime.sendMessage({ type: 'DISCLAIMER_ACCEPTED' }).catch(() => {});
     });
+  }
+  // Also clear badge on popup open if already accepted (covers the badge from a previous shortcut attempt)
+  if (disclaimerAccepted) {
+    chrome.action.setBadgeText({ text: '' }).catch(() => {});
   }
 
   // ==================== LOAD SETTINGS ====================
@@ -131,7 +137,20 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ==================== TOGGLE CAPTURE ====================
   toggleBtn.addEventListener('click', async () => {
-    // Check API key first
+    // Check disclaimer acceptance first
+    const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
+    if (!disclaimerAccepted) {
+      if (disclaimerEl) {
+        disclaimerEl.style.display = '';
+        disclaimerEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        disclaimerEl.classList.remove('pulse');
+        disclaimerEl.offsetHeight; // force reflow
+        disclaimerEl.classList.add('pulse');
+      }
+      return;
+    }
+
+    // Check API key
     if (!apiKeyInput.value.trim()) {
       apiKeyInput.focus();
       apiKeyInput.style.borderColor = '#FF4444';

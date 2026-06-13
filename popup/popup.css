@@ -802,6 +802,12 @@ kbd {
 }
 .disclaimer-btn:hover { background: rgba(255, 152, 0, 0.25); }
 
+@keyframes disclaimerPulse {
+  0%, 100% { border-color: rgba(255, 152, 0, 0.2); }
+  50% { border-color: rgba(255, 152, 0, 0.5); }
+}
+.disclaimer.pulse { animation: disclaimerPulse 1s ease-in-out 2; }
+
 /* ── Reduced Motion ──────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
