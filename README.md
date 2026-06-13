@@ -82,8 +82,12 @@ The extension captures audio from the current tab, streams it to Gemini's Live T
 
 ## Requirements
 
-- Chrome 116+ (for offscreen document support)
+- Chrome 116+ (for Document Picture-in-Picture API and offscreen document support)
 - Gemini API key (free tier available at [aistudio.google.com](https://aistudio.google.com))
+
+## Technical Notes
+
+**`web_accessible_resources` with `<all_urls>`:** The manifest declares `pip.html`, `pip.css`, and `pip.js` as web-accessible to all origins. This is required because the Document Picture-in-Picture API creates a window from a URL that must be accessible from the content script's context on any page. Without `<all_urls>`, the PiP window fails to load on third-party sites (e.g., YouTube, Twitch). These files contain no sensitive logic — they only render caption text received via `postMessage`.
 
 ## Known Limitations
 

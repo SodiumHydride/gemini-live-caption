@@ -41,6 +41,7 @@ html, body {
   gap: 4px; padding: 6px 8px;
   opacity: 0; transition: opacity .25s ease;
   flex-shrink: 0;
+  background: var(--cap-bg);
 }
 #pip-root:hover #toolbar { opacity: 1; }
 
@@ -92,14 +93,11 @@ html, body {
   white-space: pre-wrap;
   letter-spacing: 0.01em;
   transition: opacity .3s ease-out, max-height .3s ease-out;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
   max-height: 4em;
   overflow: hidden;
-}
-
-.line-original {
-  font-size: calc(var(--cap-font-size) * 0.85);
-  color: rgba(255, 255, 255, 0.6);
-  margin-bottom: 2px;
 }
 
 .line-translated {

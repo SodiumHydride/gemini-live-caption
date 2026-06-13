@@ -19,7 +19,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ==================== LOAD SETTINGS ====================
   const settings = await chrome.storage.local.get([
-    'apiKey', 'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'noiseGate', 'captionPosition', 'textColor', 'bilingualMode'
+    'apiKey', 'targetLanguage', 'fontSize', 'maxLines', 'bgOpacity', 'audioGain', 'noiseGate', 'captionPosition', 'textColor', 'bilingualMode'
   ]);
 
   if (settings.apiKey) apiKeyInput.value = settings.apiKey;
@@ -28,6 +28,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     fontSizeControl.querySelectorAll('.seg-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.value === settings.fontSize);
     });
+  }
+  if (settings.maxLines) {
+    const maxLinesControl = document.getElementById('maxLinesControl');
+    if (maxLinesControl) {
+      maxLinesControl.querySelectorAll('.seg-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.value === String(settings.maxLines));
+      });
+    }
   }
   if (settings.bgOpacity !== undefined) {
     const pct = Math.round(settings.bgOpacity * 100);
@@ -97,10 +105,13 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   await updatePipStatus();
 
-  // Listen for real-time PiP status changes
+  // Listen for real-time PiP status changes and capture state (keyboard shortcut toggle)
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area === 'session' && changes.pipWindowOpen) {
       updatePipStatus();
+    }
+    if (area === 'session' && changes.captureState) {
+      updateUI(changes.captureState.newValue);
     }
   });
 
@@ -116,6 +127,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     toggleBtn.disabled = true;
     toggleLabel.textContent = 'Starting...';
+
+    // Explicitly save API key before toggling (change event may not have fired)
+    saveSettings({ apiKey: apiKeyInput.value.trim() });
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -201,6 +215,17 @@ document.addEventListener('DOMContentLoaded', async () => {
     btn.classList.add('active');
     saveSettings({ fontSize: btn.dataset.value });
   });
+
+  const maxLinesControl = document.getElementById('maxLinesControl');
+  if (maxLinesControl) {
+    maxLinesControl.addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      maxLinesControl.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      saveSettings({ maxLines: parseInt(btn.dataset.value) });
+    });
+  }
 
   bgOpacitySlider.addEventListener('input', () => {
     const pct = bgOpacitySlider.value;
@@ -325,9 +350,15 @@ document.addEventListener('DOMContentLoaded', async () => {
           });
           const logText = lines.join('\n');
 
-          // Copy to clipboard
-          await navigator.clipboard.writeText(logText);
-          exportLogsBtn.textContent = 'Copied!';
+          // Download as .txt file
+          const blob = new Blob([logText], { type: 'text/plain;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `gemini-caption-logs-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.txt`;
+          a.click();
+          URL.revokeObjectURL(url);
+          exportLogsBtn.textContent = 'Downloaded!';
           setTimeout(() => {
             exportLogsBtn.textContent = 'Export Logs';
             exportLogsBtn.disabled = false;

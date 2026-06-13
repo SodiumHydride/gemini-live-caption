@@ -61,6 +61,7 @@ let wsGeneration = 0;
 let currentSettings = {};
 let isReconnecting = false;
 let resumptionHandle = null;
+let wsConnectTimeoutId = null;
 
 // Device change detection
 let currentOutputDeviceId = null;
@@ -163,6 +164,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     sendResponse({ entries });
     return true;
   }
+
 });
 
 // ==================== AUDIO CAPTURE ====================
@@ -188,6 +190,7 @@ async function startCapture(streamId, settings) {
 
   // Reset session state
   reconnectAttempts = 0;
+  sendMessageFailCount = 0;
 
   // 1. Get the media stream from the tab
   mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -230,7 +233,7 @@ async function startCapture(streamId, settings) {
   // 6. Monitor audio stream — restart if tracks end (e.g. another tab steals audio focus)
   for (const track of mediaStream.getAudioTracks()) {
     track.onended = () => {
-      console.warn('[SW] Audio track ended unexpectedly');
+      console.warn('[Offscreen] Audio track ended unexpectedly');
       if (isCapturing) {
         sendStatus('reconnecting', 'Audio lost, reconnecting...');
         stopCapture();
@@ -242,12 +245,12 @@ async function startCapture(streamId, settings) {
 
   // 7. Monitor AudioContext — resume if suspended by Chrome
   if (audioContext.state === 'suspended') {
-    console.log('[Offscreen] AudioContext suspended, resuming...');
+    dbg('[Offscreen] AudioContext suspended, resuming...');
     await audioContext.resume();
   }
   audioContext.onstatechange = () => {
     if (!audioContext) return;
-    console.log(`[Offscreen] AudioContext state: ${audioContext.state}`);
+    dbg(`AudioContext state: ${audioContext.state}`);
     if (audioContext.state === 'suspended' && isCapturing) {
       audioContext.resume().catch(err => {
         console.error('[Offscreen] AudioContext resume failed:', err);
@@ -296,6 +299,11 @@ function stopCapture() {
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
+  }
+
+  if (wsConnectTimeoutId) {
+    clearTimeout(wsConnectTimeoutId);
+    wsConnectTimeoutId = null;
   }
 
   if (gapFlushTimer) {
@@ -382,7 +390,8 @@ async function connectWebSocket() {
       }
     };
 
-    setTimeout(() => {
+    wsConnectTimeoutId = setTimeout(() => {
+      wsConnectTimeoutId = null;
       if (gen !== wsGeneration) return;
       if (!setupComplete) {
         // Close WebSocket on timeout to prevent resource leak
@@ -391,7 +400,7 @@ async function connectWebSocket() {
         }
         reject(new Error('WebSocket connection timeout'));
       }
-    }, 15000);
+    }, CONFIG.WS_CONNECT_TIMEOUT_MS);
   });
 }
 
@@ -416,6 +425,7 @@ function processMessage(text, resolve, reject) {
     }
     setupComplete = true;
     reconnectAttempts = 0;
+    sendMessageFailCount = 0;  // Reset on successful connect
     startCaptionWatchdog();
     startSessionRotation();
     resolve();
@@ -577,7 +587,7 @@ function handleGoAway(goAway) {
 
   if (timeLeft && parseDuration(timeLeft) > 5000) {
     scheduleSessionRotation(parseDuration(timeLeft) - 2000);
-    console.log(`[Offscreen] Scheduled rotation in ${parseDuration(timeLeft) - 2000}ms`);
+    dbg(`Scheduled rotation in ${parseDuration(timeLeft) - 2000}ms`);
   } else {
     sendStatus('reconnecting', 'Server disconnecting, reconnecting...');
     reconnectWebSocket();
@@ -654,8 +664,20 @@ function handleModelTurn(sc) {
   if (!sc.modelTurn || !sc.modelTurn.parts) return;
 
   for (const part of sc.modelTurn.parts) {
-    if (part.text && !partialText.endsWith(part.text)) {
-      partialText += part.text;
+    if (!part.text) continue;
+    // Length-based dedup: skip if incoming text is no longer than what we have.
+    // For overlaps, find the longest suffix of partialText matching a prefix of part.text.
+    if (part.text.length <= partialText.length) continue;
+    let appendFrom = 0;
+    const maxCheck = Math.min(partialText.length, part.text.length);
+    for (let len = maxCheck; len > 0; len--) {
+      if (partialText.endsWith(part.text.substring(0, len))) {
+        appendFrom = len;
+        break;
+      }
+    }
+    if (appendFrom < part.text.length) {
+      partialText += part.text.substring(appendFrom);
     }
   }
   if (partialText.trim()) {
@@ -733,6 +755,12 @@ function reconnectWebSocket() {
     return;
   }
   isReconnecting = true;
+
+  // Clear any pending scheduled reconnect to avoid orphaned connections
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   const reason = new Error().stack?.split('\n')[2]?.trim() || 'unknown';
   dbg(`reconnectWebSocket called from: ${reason}`);
   if (websocket) {
@@ -808,7 +836,7 @@ function startSessionRotation() {
   sessionRotateTimer = setTimeout(() => {
     if (!isCapturing || isReconnecting) return;
     const uptime = Math.round((Date.now() - sessionStartTime) / 1000);
-    console.log(`[Offscreen] Session rotation: session alive for ${uptime}s, rotating proactively`);
+    dbg(`Session rotation: session alive for ${uptime}s, rotating proactively`);
     sendStatus('reconnecting', 'Rotating session...');
     reconnectWebSocket();
   }, CONFIG.SESSION_ROTATE_MS);
@@ -818,7 +846,7 @@ function scheduleSessionRotation(delayMs) {
   stopSessionRotation();
   sessionRotateTimer = setTimeout(() => {
     if (!isCapturing || isReconnecting) return;
-    console.log('[Offscreen] Scheduled session rotation triggered');
+    dbg('Scheduled session rotation triggered');
     sendStatus('reconnecting', 'Rotating session...');
     reconnectWebSocket();
   }, delayMs);
@@ -984,10 +1012,12 @@ function sendCaption(text, isFinal, originalText) {
     isFinal,
   };
   if (bilingualMode) {
-    msg.original = originalText || (isFinal ? partialInputText.trim() : partialInputText.trim());
+    msg.original = originalText || (isFinal ? partialInputText.trim() : '');
     if (isFinal) partialInputText = '';
   }
-  chrome.runtime.sendMessage(msg).catch(err => {
+  chrome.runtime.sendMessage(msg).then(() => {
+    sendMessageFailCount = 0;  // Reset consecutive failure count on success
+  }).catch(err => {
     sendMessageFailCount++;
     if (sendMessageFailCount <= CONFIG.MAX_SEND_FAILURES) {
       console.warn(`[Offscreen] sendCaption failed (${sendMessageFailCount}/${CONFIG.MAX_SEND_FAILURES}):`, err.message);

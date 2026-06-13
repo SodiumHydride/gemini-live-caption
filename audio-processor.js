@@ -81,14 +81,16 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
       this.buffer = new Float32Array(this.bufferSize);
       this.bufferWriteIdx = 0;
       this.sampleCount = 0;
+      this.outputSampleCount = 0;
     } else {
       // Non-integer ratio: use ring buffer for linear interpolation
-      // Size: enough to hold resampleRatio * 2 samples (safety margin)
-      this.inputBufferSize = Math.ceil(this.resampleRatio * 2) + 128;
+      // Size: one process() call (128 samples) + ceil(resampleRatio) slack for
+      // read-position overshoot + 2 for two-sample interpolation reads
+      this.inputBufferSize = 128 + Math.ceil(this.resampleRatio) + 2;
       this.inputBuffer = new Float32Array(this.inputBufferSize);
       this.inputWriteIdx = 0;
-      this.inputReadIdx = 0;
-      this.inputAvailable = 0;
+      this.readPos = 0;  // fractional read position (independent accumulator)
+      this.totalInputSamples = 0;  // global counter for valid-sample boundary
     }
 
     // Output accumulation buffer: 100ms at 16kHz = 1600 samples
@@ -137,7 +139,9 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
         this.sampleCount++;
 
         if (this.sampleCount % this.M === 0) {
-          const downsampled = this._applyPolyphaseFilter();
+          const phase = this.outputSampleCount % this.M;
+          const downsampled = this._applyPolyphaseFilter(phase);
+          this.outputSampleCount++;
           this.outputBuffer[this.outputWriteIdx++] = downsampled;
 
           if (this.outputWriteIdx >= this.CHUNK_SAMPLES) {
@@ -147,27 +151,24 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
         }
       }
     } else {
-      // Non-integer ratio: use ring buffer with linear interpolation
+      // Non-integer ratio: linear interpolation resampling
+      // readPos is an independent fractional accumulator (in input-sample units).
+      // Each output sample advances readPos by resampleRatio.
+      // Floor(readPos) = input sample index, frac = interpolation weight.
       for (let i = 0; i < channelData.length; i++) {
         // Write to ring buffer
         this.inputBuffer[this.inputWriteIdx] = channelData[i];
         this.inputWriteIdx = (this.inputWriteIdx + 1) % this.inputBufferSize;
-        this.inputAvailable++;
+        this.totalInputSamples++;
 
-        // Check if we have enough samples to produce an output
-        while (this.inputAvailable >= this.resampleRatio) {
-          // Calculate read position (relative to read pointer)
-          const idx = this.inputAvailable - this.resampleRatio;
-          const idxFloor = Math.floor(idx);
-          const frac = idx - idxFloor;
+        // Produce output samples: need floor(readPos)+1 to be a valid (written) sample
+        while (this.readPos + 1 < this.totalInputSamples) {
+          const idx0 = Math.floor(this.readPos) % this.inputBufferSize;
+          const idx1 = (idx0 + 1) % this.inputBufferSize;
+          const frac = this.readPos - Math.floor(this.readPos);
 
-          // Read samples from ring buffer using pointer arithmetic
-          const readPos0 = (this.inputReadIdx + idxFloor) % this.inputBufferSize;
-          const readPos1 = (readPos0 + 1) % this.inputBufferSize;
-
-          // Linear interpolation
-          const sample = this.inputBuffer[readPos0] * (1 - frac) +
-                        this.inputBuffer[readPos1] * frac;
+          const sample = this.inputBuffer[idx0] * (1 - frac) +
+                        this.inputBuffer[idx1] * frac;
 
           this.outputBuffer[this.outputWriteIdx++] = sample;
 
@@ -176,37 +177,36 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
             this.outputWriteIdx = 0;
           }
 
-          // Advance read pointer (consume samples)
-          const consumed = Math.floor(this.resampleRatio);
-          this.inputReadIdx = (this.inputReadIdx + consumed) % this.inputBufferSize;
-          this.inputAvailable -= consumed;
+          this.readPos += this.resampleRatio;
         }
       }
+      // readPos and totalInputSamples grow monotonically (both ~128 per call).
+      // JavaScript float64 handles this without precision issues.
+      // Buffer indexing uses % inputBufferSize, so no wrapping needed.
     }
 
     return true;
   }
 
   /**
-   * Apply polyphase decimation filter at the current buffer position.
+   * Apply polyphase decimation filter for a single phase.
+   * For the Nth output sample, only phase (N % M) is selected.
+   * Each phase reads M-spaced samples from the delay line offset by its phase index.
    */
-  _applyPolyphaseFilter() {
+  _applyPolyphaseFilter(phase) {
+    const coeffs = this.phases[phase];
+    const len = coeffs.length;
+
+    // Start reading from the most recent sample, going backward by phase
+    // phase 0 reads x[n], x[n-3], x[n-6]...
+    // phase 1 reads x[n-1], x[n-4], x[n-7]...
+    // phase 2 reads x[n-2], x[n-5], x[n-8]...
+    let readIdx = (this.bufferWriteIdx - 1 - phase + this.bufferSize) % this.bufferSize;
+
     let sum = 0;
-
-    for (let phase = 0; phase < this.M; phase++) {
-      const coeffs = this.phases[phase];
-      const len = coeffs.length;
-
-      // Start reading from the most recent sample, going backward by phase
-      // phase 0 reads x[n], x[n-3], x[n-6]...
-      // phase 1 reads x[n-1], x[n-4], x[n-7]...
-      // phase 2 reads x[n-2], x[n-5], x[n-8]...
-      let readIdx = (this.bufferWriteIdx - 1 - phase + this.bufferSize) % this.bufferSize;
-
-      for (let k = 0; k < len; k++) {
-        sum += coeffs[k] * this.buffer[readIdx];
-        readIdx = (readIdx + this.M) % this.bufferSize;
-      }
+    for (let k = 0; k < len; k++) {
+      sum += coeffs[k] * this.buffer[readIdx];
+      readIdx = (readIdx - this.M + this.bufferSize) % this.bufferSize;
     }
 
     return sum;
@@ -278,7 +278,7 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
 
   _kaiserWindow(t, beta) {
     const x = t * t; // t^2, where t is in [-1, 1]
-    if (x >= 1) return 0;
+    if (x > 1) return 0;
     return this._bessel0(beta * Math.sqrt(1 - x)) / this._bessel0(beta);
   }
 

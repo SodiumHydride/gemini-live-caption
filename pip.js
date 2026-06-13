@@ -16,7 +16,7 @@
   let track, linesEl, placeholder, settingsPanel;
   let historyPanel, historyScroll, historyOverlay;
   let historyVisible = false;
-  let maxLines = 3;
+  let maxLines = 2;
   let fadeTimer = null;
   let capturing = false;
 
@@ -25,7 +25,6 @@
   let currentPartialEl = null;
   let currentPartialText = '';
   let lineCount = 0;
-  let viewportLocked = false;
 
   // Caption history buffer
   const CAPTION_HISTORY_SIZE = 500;
@@ -124,8 +123,9 @@
       }
     });
 
-    // Listen for messages from content.js
+    // Listen for messages from content.js (verify source to prevent injection)
     window.addEventListener('message', (event) => {
+      if (event.source !== window.opener) return;
       if (!event.data || !event.data.type) return;
       switch (event.data.type) {
         case 'CAPTION_UPDATE':
@@ -136,6 +136,10 @@
           break;
         case 'SETTINGS_UPDATE':
           applySettings(event.data);
+          break;
+        case 'PIP_CLOSE_REQUEST':
+          notifyClosed();
+          window.close();
           break;
       }
     });
@@ -199,6 +203,9 @@
         b.classList.toggle('on', b.dataset.v === s.textColor);
       });
     }
+    if (s.bilingualMode !== undefined) {
+      // bilingualMode state is informational for PiP; rendering handled by content.js
+    }
     if (s.maxLines) {
       maxLines = s.maxLines;
       const seg = document.getElementById('sp-maxlines');
@@ -215,60 +222,31 @@
       track.removeChild(track.firstChild);
       lineCount--;
     }
-    viewportLocked = false;
-    linesEl.style.height = '';
-    // Recalculate if we have lines
-    if (track.firstChild) {
-      const lineH = track.firstChild.offsetHeight;
-      linesEl.style.height = (lineH * maxLines) + 'px';
-      viewportLocked = true;
-    }
   }
 
   // ==================== ADD LINE ====================
   function addLine(text, originalText) {
     const el = document.createElement('div');
     el.className = 'line';
-
-    if (originalText) {
-      // Bilingual mode: original + translated
-      const origEl = document.createElement('div');
-      origEl.className = 'line-original';
-      origEl.textContent = originalText;
-      const transEl = document.createElement('div');
-      transEl.className = 'line-translated';
-      transEl.textContent = text;
-      el.appendChild(origEl);
-      el.appendChild(transEl);
-    } else {
-      el.textContent = text;
-    }
+    el.textContent = text;
 
     track.appendChild(el);
     lineCount++;
 
-    if (!viewportLocked) {
-      const lineH = el.offsetHeight;
-      linesEl.style.height = (lineH * maxLines) + 'px';
-      viewportLocked = true;
-    }
-
     if (lineCount > maxLines) {
-      const lineH = el.offsetHeight;
-      track.style.transform = `translateY(-${lineH}px)`;
-
-      track.addEventListener('transitionend', function handler(event) {
-        if (event.propertyName !== 'transform') return;
-        track.removeEventListener('transitionend', handler);
-        if (track.firstChild && track.firstChild !== el) {
-          track.removeChild(track.firstChild);
-        }
-        lineCount--;
-        track.style.transition = 'none';
-        track.style.transform = 'translateY(0)';
-        track.offsetHeight;
-        track.style.transition = '';
-      }, { once: true });
+      // Smooth scroll: collapse oldest line, remaining lines shift up naturally
+      const oldLine = track.firstChild;
+      if (oldLine && oldLine.parentNode === track) {
+        oldLine.style.transition = 'opacity 0.3s ease-out, max-height 0.3s ease-out, padding 0.3s ease-out';
+        oldLine.style.opacity = '0';
+        oldLine.style.maxHeight = '0';
+        oldLine.style.padding = '0';
+        oldLine.style.overflow = 'hidden';
+        setTimeout(() => {
+          if (oldLine.parentNode === track) track.removeChild(oldLine);
+          lineCount--;
+        }, 300);
+      }
     }
   }
 
@@ -288,9 +266,9 @@
       lastFinalized = text;
       currentPartialEl = null;
       currentPartialText = '';
-      addLine(text, originalText);
+      addLine(text);
 
-      // Add to history buffer
+      // Add to history buffer (with original for bilingual transcript)
       const ts = Date.now();
       captionHistory.push({ text, ts, original: originalText || '' });
       if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
@@ -301,26 +279,10 @@
       }
     } else {
       if (currentPartialEl && currentPartialEl.parentNode === track) {
-        // Update translated text
-        const transEl = currentPartialEl.querySelector('.line-translated');
-        if (transEl) {
-          transEl.textContent = text;
-        } else {
-          currentPartialEl.textContent = text;
-        }
-        // Update original text if available
-        if (originalText) {
-          let origEl = currentPartialEl.querySelector('.line-original');
-          if (!origEl) {
-            origEl = document.createElement('div');
-            origEl.className = 'line-original';
-            currentPartialEl.insertBefore(origEl, currentPartialEl.firstChild);
-          }
-          origEl.textContent = originalText;
-        }
+        currentPartialEl.textContent = text;
         currentPartialText = text;
       } else {
-        addLine(text, originalText);
+        addLine(text);
         currentPartialEl = track.lastChild;
         currentPartialText = text;
       }
@@ -362,9 +324,6 @@
   function clearTrack() {
     while (track.firstChild) track.removeChild(track.firstChild);
     lineCount = 0;
-    viewportLocked = false;
-    linesEl.style.height = '';
-    track.style.transform = 'translateY(0)';
     linesEl.style.display = 'none';
     placeholder.classList.add('show');
     currentPartialEl = null;

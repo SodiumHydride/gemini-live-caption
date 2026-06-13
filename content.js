@@ -4,33 +4,68 @@
 (function () {
   'use strict';
 
+  const DEBUG = false;
+  const dbg = DEBUG ? (...args) => console.log('[Content]', ...args) : () => {};
+
   const HOST_ID = 'gemini-live-caption-host';
   const STORE_KEY = 'captionLayout';
-  const MAX_LINES = 3;
+  let MAX_LINES = 3; // Configurable via popup settings
 
   let shadow, wrap, linesEl, track, placeholder, pipBtn, statusIndicator;
   let historyPanel, historyScroll, historyOverlay;
   let historyVisible = false;
   let fadeTimer = null, capturing = false;
+  let pipActive = false; // When true, suppress overlay display (PiP is showing captions)
   let layout = { x: null, y: null, w: 560 };
   let lineCount = 0;
   let initGeneration = 0;  // Prevents stale async callbacks from building on wrong shadow
   let listenerController = null;  // AbortController for document-level listeners
+  let hostObserver = null;  // MutationObserver watching for host removal
+  let suppressObserver = false;  // Guard: skip observer callback during intentional removal
+
+  // Disconnect any leftover observer from a previous script injection (re-injection dedup)
+  const _obsKey = Symbol.for('__geminiCaptionObserver');
+  if (window[_obsKey]) {
+    window[_obsKey].disconnect();
+    window[_obsKey] = null;
+  }
 
   // ==================== INIT ====================
-  const FONT_MAP = { small: '2.4vh', medium: '3.2vh', large: '4vh' };
+  const FONT_MAP = { small: '2.4vh', medium: '3.2vh', large: '4vh', xlarge: '5vh' };
 
   function applySettings(s) {
     if (!shadow) return;
     const host = shadow.host;
     if (s.fontSize) host.style.setProperty('--cap-font-size', FONT_MAP[s.fontSize] ?? FONT_MAP.medium);
     if (s.bgOpacity !== undefined) host.style.setProperty('--cap-bg', `rgba(0,0,0,${s.bgOpacity})`);
+    if (s.maxLines) {
+      MAX_LINES = s.maxLines;
+      // Recalculate viewport with new limit using tallest line seen
+      if (linesEl && maxLineHeight > 0) {
+        linesEl.style.maxHeight = (maxLineHeight * MAX_LINES) + 'px';
+      }
+      // Trim excess lines if new limit is smaller
+      if (track) {
+        while (lineCount > MAX_LINES && track.firstChild) {
+          track.removeChild(track.firstChild);
+          lineCount--;
+        }
+      }
+    }
   }
 
   function init() {
+    // Disconnect previous observer to prevent accumulation
+    if (hostObserver) {
+      hostObserver.disconnect();
+      hostObserver = null;
+    }
+
     // Clean up any existing overlay (idempotent — safe for re-injection)
+    suppressObserver = true;
     const existing = document.getElementById(HOST_ID);
     if (existing) existing.remove();
+    suppressObserver = false;
 
     // Abort previous document-level listeners to prevent accumulation
     if (listenerController) {
@@ -45,11 +80,13 @@
     document.documentElement.appendChild(host);
     shadow = host.attachShadow({ mode: 'closed' });
     const gen = ++initGeneration;
-    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity'], r => {
+    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity', 'maxLines'], r => {
       if (gen !== initGeneration) return;  // Stale callback, ignore
       if (r[STORE_KEY]) Object.assign(layout, r[STORE_KEY]);
+      if (r.maxLines) MAX_LINES = r.maxLines;
       build();
       applySettings(r);
+      dbg('Init complete, MAX_LINES =', MAX_LINES);
     });
 
     // ESC key to close history panel (using AbortController for cleanup)
@@ -58,6 +95,9 @@
         hideHistory();
       }
     }, { signal });
+
+    // Restart observer to watch for the new host being removed
+    startObserver();
   }
 
   function build() {
@@ -217,6 +257,7 @@
         min-width: 200px; max-width: 90vw;
         border-radius: 12px; overflow: hidden;
         box-shadow: 0 8px 32px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.05);
+        background: var(--cap-bg);
       }
       .w.vis { opacity: 1; transform: translateY(0); pointer-events: auto; }
 
@@ -272,12 +313,6 @@
         user-select: text;
         -webkit-user-select: text;
         cursor: text;
-      }
-
-      .line-original {
-        font-size: calc(var(--cap-font-size) * 0.85);
-        color: rgba(255, 255, 255, 0.6);
-        margin-bottom: 2px;
       }
 
       .line-translated {
@@ -471,38 +506,24 @@
   }
 
   // ==================== ADD LINE ====================
-  let viewportLocked = false;
+  let maxLineHeight = 0;
 
-  function addLine(text, originalText) {
+  function addLine(text) {
     const el = document.createElement('div');
     el.className = 'line';
-
-    if (originalText) {
-      // Bilingual mode: original + translated
-      const origEl = document.createElement('div');
-      origEl.className = 'line-original';
-      origEl.textContent = originalText;
-      const transEl = document.createElement('div');
-      transEl.className = 'line-translated';
-      transEl.textContent = text;
-      el.appendChild(origEl);
-      el.appendChild(transEl);
-    } else {
-      el.textContent = text;
-    }
+    el.textContent = text;
 
     track.appendChild(el);
     lineCount++;
 
-    // Lock viewport height on first line — prevents container flash.
-    // Wait for browser layout so offsetHeight is accurate.
-    if (!viewportLocked) {
-      viewportLocked = true;
-      requestAnimationFrame(() => {
-        const lineH = el.offsetHeight || parseFloat(getComputedStyle(el).fontSize) * 1.45 || 32;
-        linesEl.style.height = (lineH * MAX_LINES) + 'px';
-      });
-    }
+    // Update viewport height based on tallest line seen
+    requestAnimationFrame(() => {
+      const lineH = el.offsetHeight || 32;
+      if (lineH > maxLineHeight) {
+        maxLineHeight = lineH;
+        linesEl.style.maxHeight = (lineH * MAX_LINES) + 'px';
+      }
+    });
 
     if (lineCount > MAX_LINES) {
       // Slide track up by one line height
@@ -532,7 +553,7 @@
   let currentPartialText = '';
 
   function show(text, isFinal, originalText) {
-    if (!text) return;
+    if (!text || pipActive) return; // Skip overlay display when PiP is active
 
     if (isFinal) {
       // Dedup: skip if already finalized this text (trim to handle whitespace differences)
@@ -550,30 +571,14 @@
       lastFinalized = text;
       currentPartialEl = null;
       currentPartialText = '';
-      addLine(text, originalText);
+      addLine(text);
     } else {
       // Partial: update current line in-place (live preview)
       if (currentPartialEl && currentPartialEl.parentNode === track) {
-        // Update translated text
-        const transEl = currentPartialEl.querySelector('.line-translated');
-        if (transEl) {
-          transEl.textContent = text;
-        } else {
-          currentPartialEl.textContent = text;
-        }
-        // Update original text if available
-        if (originalText) {
-          let origEl = currentPartialEl.querySelector('.line-original');
-          if (!origEl) {
-            origEl = document.createElement('div');
-            origEl.className = 'line-original';
-            currentPartialEl.insertBefore(origEl, currentPartialEl.firstChild);
-          }
-          origEl.textContent = originalText;
-        }
+        currentPartialEl.textContent = text;
         currentPartialText = text;
       } else {
-        addLine(text, originalText);
+        addLine(text);
         currentPartialEl = track.lastChild;
         currentPartialText = text;
       }
@@ -597,11 +602,14 @@
   // Fade out all lines and clear track after animation
   function fadeOutAndClear() {
     capturing = false;
+    // Fade out individual lines
     for (const child of Array.from(track.children)) {
       child.style.opacity = '0';
       child.style.maxHeight = '0';
       child.style.padding = '0 1em';
     }
+    // Hide the entire overlay container (will re-show on next caption via show())
+    wrap.classList.remove('vis');
     setTimeout(() => {
       if (!capturing) {
         clearTrackState();
@@ -613,8 +621,8 @@
   function clearTrackState() {
     while (track.firstChild) track.removeChild(track.firstChild);
     lineCount = 0;
-    viewportLocked = false;
-    linesEl.style.height = '';
+    maxLineHeight = 0;
+    linesEl.style.maxHeight = '';
     track.style.transform = 'translateY(0)';
     linesEl.style.display = 'none';
     placeholder.classList.add('show');
@@ -962,20 +970,42 @@
 
   async function togglePiP(btn) {
     if (pipWindow && !pipWindow.closed) {
-      pipWindow.close();
+      // Send close request via postMessage first (more reliable for Document PiP).
+      // Fallback to direct close if postMessage fails.
+      try {
+        postToPiP({ type: 'PIP_CLOSE_REQUEST' });
+      } catch (e) {}
+      try {
+        pipWindow.close();
+      } catch (e) {}
+      pipWindow = null;
+      btn.classList.remove('active');
+      chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});
+      // Restore overlay when PiP closes
+      pipActive = false;
+      if (capturing) wrap.classList.add('vis');
       return;
     }
 
     if (!isPiPSupported()) {
-      console.warn('[Gemini Live Caption] Document PiP not supported');
+      dbg('Document PiP not supported');
       return;
     }
 
     try {
+      // Fixed 2-line PiP window + toolbar (use px since PiP uses px font sizes)
+      const pipWidth = Math.max(layout.w || 560, 400);
+      const pipFontSize = 28; // PiP medium font size in px
+      const pipLineH = pipFontSize * 1.4 + 12; // line-height + padding
+      const pipHeight = Math.round(pipLineH * 2 + 50); // 2 lines + toolbar
       pipWindow = await window.documentPictureInPicture.requestWindow({
-        width: 800,
-        height: 360,
+        width: pipWidth,
+        height: pipHeight,
       });
+
+      // Hide overlay while PiP is open (avoid double display)
+      pipActive = true;
+      wrap.classList.remove('vis');
 
       // Fetch pip.html and replace relative URLs with absolute extension URLs.
       // PiP window inherits host page origin, so relative paths break.
@@ -984,6 +1014,9 @@
       html = html
         .replace('href="pip.css"', `href="${chrome.runtime.getURL('pip.css')}"`)
         .replace('src="pip.js"', `src="${chrome.runtime.getURL('pip.js')}"`);
+      // Standard Document PiP pattern (per Google docs): write extension-controlled HTML
+      // into the PiP window. Source is the extension's own pip.html via chrome.runtime.getURL() -
+      // no user input is involved.
       pipWindow.document.write(html);
       pipWindow.document.close();
 
@@ -1013,17 +1046,32 @@
       window.addEventListener('message', onPiPMessage);
 
       // PiP window closed by user (browser chrome close button, etc.)
-      pipWindow.addEventListener('pagehide', () => {
+      // Capture reference to avoid closure race if pipWindow is reassigned.
+      const thisPipWin = pipWindow;
+      thisPipWin.addEventListener('pagehide', () => {
         chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});
         btn.classList.remove('active');
-        pipWindow = null;
+        if (pipWindow === thisPipWin) pipWindow = null;
         window.removeEventListener('message', onPiPMessage);
+        // Restore overlay when PiP closes
+        pipActive = false;
+        if (capturing) wrap.classList.add('vis');
       });
 
       // Replay recent captions into PiP window so it's not empty on open
       replayBufferToPiP();
+
+      // Sync settings to PiP (but NOT maxLines — PiP has its own independent setting)
+      chrome.storage.local.get(['fontSize', 'bgOpacity', 'textColor', 'bilingualMode'], (r) => {
+        const s = {};
+        if (r.fontSize) s.fontSize = r.fontSize;
+        if (r.bgOpacity !== undefined) s.bgOpacity = r.bgOpacity;
+        if (r.textColor) s.textColor = r.textColor;
+        if (r.bilingualMode !== undefined) s.bilingualMode = r.bilingualMode;
+        if (Object.keys(s).length) postToPiP({ type: 'SETTINGS_UPDATE', ...s });
+      });
     } catch (err) {
-      console.warn('[Gemini Live Caption] PiP failed:', err);
+      dbg('PiP failed:', err);
       pipWindow = null;
     }
   }
@@ -1074,7 +1122,7 @@
     if (!pipWindow || pipWindow.closed) return;
     const recent = captionHistory.slice(-PIP_BUFFER_SIZE);
     for (const entry of recent) {
-      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true });
+      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true, original: entry.original });
     }
   }
 
@@ -1101,20 +1149,22 @@
         if (contextInvalidated) {
           // Extension was reloaded — reinitialize the overlay from scratch.
           // The new service worker injected us fresh; re-init DOM and layout.
-          console.log('[Gemini Live Caption] Reinitializing after context invalidation');
+          dbg('Reinitializing after context invalidation');
           contextInvalidated = false;
           try {
+            suppressObserver = true;
             const oldHost = document.getElementById(HOST_ID);
             if (oldHost) oldHost.remove();
+            suppressObserver = false;
             shadow = wrap = linesEl = track = placeholder = statusIndicator = null;
-            viewportLocked = false;
+            maxLineHeight = 0;
             lineCount = 0;
             currentPartialEl = null;
             currentPartialText = '';
             lastFinalized = '';
             init();
           } catch (reinitErr) {
-            console.warn('[Gemini Live Caption] Reinit failed:', reinitErr);
+            dbg('Reinit failed:', reinitErr);
           }
         }
         show(msg.text, msg.isFinal, msg.original);
@@ -1144,7 +1194,7 @@
       }
     } catch (e) {
       if (e.message && e.message.includes('Extension context invalidated')) {
-        console.log('[Gemini Live Caption] Extension context invalidated');
+        dbg('Extension context invalidated');
         contextInvalidated = true;
         // Do NOT remove the listener — the new service worker's messages
         // may still route through this handler on some Chrome versions.
@@ -1153,32 +1203,52 @@
     }
   }
   // Listener dedup: remove previous handler if this script was re-injected.
-  if (window.__geminiCaptionHandler) {
-    chrome.runtime.onMessage.removeListener(window.__geminiCaptionHandler);
+  // Use Symbol.for so the key is shared across re-injections but non-enumerable.
+  const _dedup = Symbol.for('__geminiCaptionHandler');
+  if (window[_dedup]) {
+    chrome.runtime.onMessage.removeListener(window[_dedup]);
   }
-  window.__geminiCaptionHandler = messageHandler;
+  window[_dedup] = messageHandler;
   chrome.runtime.onMessage.addListener(messageHandler);
 
   // ==================== SETTINGS REAL-TIME SYNC ====================
-  chrome.storage.onChanged.addListener((changes, area) => {
+  const _storageDedup = Symbol.for('__geminiCaptionStorageListener');
+  if (window[_storageDedup]) {
+    chrome.storage.onChanged.removeListener(window[_storageDedup]);
+  }
+  function _onStorageChanged(changes, area) {
     if (area !== 'local') return;
     const s = {};
     if (changes.fontSize) s.fontSize = changes.fontSize.newValue;
     if (changes.bgOpacity) s.bgOpacity = changes.bgOpacity.newValue;
+    if (changes.textColor) s.textColor = changes.textColor.newValue;
+    if (changes.bilingualMode) s.bilingualMode = changes.bilingualMode.newValue;
+    if (changes.maxLines) {
+      // Overlay maxLines — don't relay to PiP (PiP has its own independent setting)
+      applySettings({ maxLines: changes.maxLines.newValue });
+    }
     if (Object.keys(s).length) {
       applySettings(s);
       relaySettingsToPiP(s);
     }
-  });
+  }
+  window[_storageDedup] = _onStorageChanged;
+  chrome.storage.onChanged.addListener(_onStorageChanged);
 
   // ==================== AUTO-REPAIR ====================
-  const obs = new MutationObserver(() => { if (!document.getElementById(HOST_ID)) init(); });
+  function startObserver() {
+    hostObserver = new MutationObserver(() => {
+      if (suppressObserver) return;
+      if (!document.getElementById(HOST_ID)) init();
+    });
+    hostObserver.observe(document.documentElement, { childList: true, subtree: false });
+    window[_obsKey] = hostObserver;  // Expose for cross-injection dedup
+  }
+
   if (document.documentElement) {
-    obs.observe(document.documentElement, { childList: true, subtree: false });
     init();
   } else {
     document.addEventListener('DOMContentLoaded', () => {
-      obs.observe(document.documentElement, { childList: true, subtree: false });
       init();
     });
   }

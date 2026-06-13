@@ -7,6 +7,9 @@
 // - Single offscreen document for audio processing
 // - State machine: idle → starting → capturing → stopping
 
+const DEBUG = false;
+const dbg = (...args) => DEBUG && console.log(...args);
+
 // ==================== STATE MANAGEMENT ====================
 // State structure in chrome.storage.session:
 // {
@@ -34,7 +37,7 @@
   if (captureState === 'starting' || captureState === 'stopping') {
     // Transition states are transient — if the SW died mid-transition,
     // the operation is incomplete. Clean up and reset.
-    console.log(`[SW] Recovering from stuck state: ${captureState}`);
+    dbg(`[SW] Recovering from stuck state: ${captureState}`);
     const contexts = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
     if (contexts.length > 0) {
       try { await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }); } catch (e) {}
@@ -53,7 +56,7 @@
     }
 
     if (!tabAlive) {
-      console.log(`[SW] Active tab ${activeTabId} no longer exists, cleaning up`);
+      dbg(`[SW] Active tab ${activeTabId} no longer exists, cleaning up`);
       try { await chrome.runtime.sendMessage({ type: 'STOP_CAPTURE' }); } catch (e) {}
       await closeOffscreenDocument();
       await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
@@ -65,7 +68,7 @@
     const contexts = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
     if (contexts.length === 0) {
       // Offscreen document is gone. Clean up.
-      console.log('[SW] Offscreen document missing during recovery, resetting');
+      dbg('[SW] Offscreen document missing during recovery, resetting');
       await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
       await chrome.action.setBadgeText({ text: '' });
       return;
@@ -75,7 +78,7 @@
     const now = Date.now();
     if (lastHeartbeat && (now - lastHeartbeat) < 30000) {
       // Heartbeat is fresh (< 30s old) — offscreen is alive and capturing.
-      console.log('[SW] Offscreen alive (heartbeat fresh), capture continues');
+      dbg('[SW] Offscreen alive (heartbeat fresh), capture continues');
       // Re-inject content script — it may have been lost during SW restart
       await ensureContentScript(activeTabId);
       await chrome.action.setBadgeText({ text: 'ON' });
@@ -86,14 +89,14 @@
     // No recent heartbeat. Ping the offscreen directly — it may have just
     // started and not sent its first heartbeat yet, or the SW restarted
     // before the first heartbeat arrived.
-    console.log('[SW] No recent heartbeat, pinging offscreen...');
+    dbg('[SW] No recent heartbeat, pinging offscreen...');
     try {
       const pong = await Promise.race([
         chrome.runtime.sendMessage({ type: 'PING' }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('ping timeout')), 5000)),
       ]);
       if (pong && pong.alive) {
-        console.log('[SW] Offscreen responded to PING, capture continues');
+        dbg('[SW] Offscreen responded to PING, capture continues');
         // Re-inject content script — it may have been lost during SW restart
         await ensureContentScript(activeTabId);
         await chrome.action.setBadgeText({ text: 'ON' });
@@ -101,11 +104,11 @@
         return;
       }
     } catch (e) {
-      console.log('[SW] Offscreen ping failed:', e.message);
+      dbg('[SW] Offscreen ping failed:', e.message);
     }
 
     // Offscreen is not responding. Clean up.
-    console.log('[SW] Offscreen appears dead, resetting to idle');
+    dbg('[SW] Offscreen appears dead, resetting to idle');
     await closeOffscreenDocument();
     await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
     await chrome.action.setBadgeText({ text: '' });
@@ -135,7 +138,7 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   // If switching to a different tab while capturing — do nothing.
   // Audio capture stays locked to the original source tab.
   if (captureState === 'capturing' && activeTabId !== tabId) {
-    console.log(`[SW] Tab switched to ${tabId}, keeping capture on source tab ${activeTabId}`);
+    dbg(`[SW] Tab switched to ${tabId}, keeping capture on source tab ${activeTabId}`);
   }
 });
 
@@ -144,7 +147,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   const { activeTabId, waitingReloadTabId } = await chrome.storage.session.get(['activeTabId', 'waitingReloadTabId']);
 
   if (tabId === activeTabId) {
-    console.log('[SW] Active tab closed, stopping capture');
+    dbg('[SW] Active tab closed, stopping capture');
     await stopCapture();
   }
 
@@ -162,7 +165,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 
   // If the active tab starts loading a new page
   if (changeInfo.status === 'loading' && tabId === activeTabId && captureState === 'capturing') {
-    console.log(`[SW] Active tab ${tabId} navigating, stopping capture`);
+    dbg(`[SW] Active tab ${tabId} navigating, stopping capture`);
     await stopCapture();
     await chrome.storage.session.set({ waitingReloadTabId: tabId });
   }
@@ -172,11 +175,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
     // Verify this is still the active tab before resuming
     const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (currentTab && currentTab.id === tabId) {
-      console.log(`[SW] Tab ${tabId} reloaded, resuming capture`);
+      dbg(`[SW] Tab ${tabId} reloaded, resuming capture`);
       await chrome.storage.session.set({ waitingReloadTabId: null });
       await startCapture(tabId);
     } else {
-      console.log(`[SW] Tab ${tabId} reloaded but no longer active, skipping resume`);
+      dbg(`[SW] Tab ${tabId} reloaded but no longer active, skipping resume`);
       await chrome.storage.session.set({ waitingReloadTabId: null });
     }
   }
@@ -186,15 +189,20 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 chrome.tabs.onReplaced.addListener(async (addedTabId, removedTabId) => {
   const { activeTabId } = await chrome.storage.session.get('activeTabId');
   if (removedTabId === activeTabId) {
-    console.log(`[SW] Tab replaced: ${removedTabId} → ${addedTabId}, restarting capture`);
+    dbg(`[SW] Tab replaced: ${removedTabId} → ${addedTabId}, restarting capture`);
     await chrome.storage.session.set({ activeTabId: addedTabId });
     // Restart capture with new tab ID since stream ID is tab-specific
     try {
       await stopCapture();
     } catch (e) {
-      console.warn('[SW] stopCapture failed during tab replace:', e);
+      dbg('[SW] stopCapture failed during tab replace:', e);
     }
-    await startCapture(addedTabId);
+    try {
+      await startCapture(addedTabId);
+    } catch (e) {
+      dbg('[SW] startCapture failed during tab replace:', e);
+      await chrome.storage.session.set({ captureState: 'idle', activeTabId: null });
+    }
   }
 });
 
@@ -297,7 +305,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const allowed = {};
       if (typeof msg.settings?.apiKey === 'string') allowed.apiKey = msg.settings.apiKey;
       if (typeof msg.settings?.targetLanguage === 'string') allowed.targetLanguage = msg.settings.targetLanguage;
-      if (['small', 'medium', 'large'].includes(msg.settings?.fontSize)) allowed.fontSize = msg.settings.fontSize;
+      if (['small', 'medium', 'large', 'xlarge'].includes(msg.settings?.fontSize)) allowed.fontSize = msg.settings.fontSize;
       if (typeof msg.settings?.bgOpacity === 'number' && msg.settings.bgOpacity >= 0 && msg.settings.bgOpacity <= 1) {
         allowed.bgOpacity = msg.settings.bgOpacity;
       }
@@ -307,6 +315,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (typeof msg.settings?.noiseGate === 'number' && msg.settings.noiseGate >= 0 && msg.settings.noiseGate <= 0.05) {
         allowed.noiseGate = msg.settings.noiseGate;
       }
+      if (typeof msg.settings?.bilingualMode === 'boolean') allowed.bilingualMode = msg.settings.bilingualMode;
+      if ([2, 3, 4].includes(msg.settings?.maxLines)) allowed.maxLines = msg.settings.maxLines;
       if (Object.keys(allowed).length === 0) {
         sendResponse({ success: false, error: 'No valid settings' });
         return;
@@ -383,7 +393,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'PIP_OPENED') {
     (async () => {
       await chrome.storage.session.set({ pipWindowOpen: true });
-      console.log('[SW] PiP window opened');
+      dbg('[SW] PiP window opened');
     })();
     return false;
   }
@@ -391,7 +401,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'PIP_CLOSED') {
     (async () => {
       await chrome.storage.session.set({ pipWindowOpen: false });
-      console.log('[SW] PiP window closed');
+      dbg('[SW] PiP window closed');
     })();
     return false;
   }
@@ -431,7 +441,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // Handle extension install/update
 chrome.runtime.onInstalled.addListener(async (details) => {
-  console.log(`[SW] Extension ${details.reason}`);
+  dbg(`[SW] Extension ${details.reason}`);
   const existing = await chrome.storage.local.get(['targetLanguage', 'apiKey']);
   if (!existing.targetLanguage) {
     await chrome.storage.local.set({
@@ -452,7 +462,7 @@ async function toggleCapture(tabId) {
 
   // Ignore if in transition
   if (captureState === 'starting' || captureState === 'stopping') {
-    console.log('[SW] Capture in transition, ignoring toggle');
+    dbg('[SW] Capture in transition, ignoring toggle');
     return;
   }
 
@@ -475,13 +485,13 @@ async function toggleCapture(tabId) {
 }
 
 async function startCapture(tabId) {
-  console.log(`[SW] Starting capture for tab ${tabId}`);
+  dbg(`[SW] Starting capture for tab ${tabId}`);
 
   // Check if the tab is a Chrome internal page
   try {
     const tab = await chrome.tabs.get(tabId);
     const url = tab.url || tab.pendingUrl || '';
-    console.log(`[SW] Tab URL: ${url}`);
+    dbg(`[SW] Tab URL: ${url}`);
 
     if (!url || url.startsWith('chrome://') || url.startsWith('chrome-extension://') ||
         url.startsWith('chrome-web-store://') || url.startsWith('edge://') ||
@@ -533,7 +543,7 @@ async function startCapture(tabId) {
     await chrome.storage.session.set({ captureState: 'capturing' });
     await chrome.action.setBadgeText({ text: 'ON' });
     await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
-    console.log('[SW] Capture started');
+    dbg('[SW] Capture started');
   } catch (err) {
     console.error('[SW] Start capture failed:', err);
     await chrome.storage.session.set({ captureState: 'idle', activeTabId: null });
@@ -544,7 +554,7 @@ async function startCapture(tabId) {
 }
 
 async function stopCapture() {
-  console.log('[SW] Stopping capture');
+  dbg('[SW] Stopping capture');
   await chrome.storage.session.set({ captureState: 'stopping' });
 
   try {
@@ -565,9 +575,9 @@ async function stopCapture() {
   // No broadcast via chrome.runtime.sendMessage — would cause double-receive.
 
   await closeOffscreenDocument();
-  await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, lastHeartbeat: null });
+  await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null, lastHeartbeat: null });
   await chrome.action.setBadgeText({ text: '' });
-  console.log('[SW] Capture stopped');
+  dbg('[SW] Capture stopped');
 }
 
 // ==================== HELPER FUNCTIONS ====================
@@ -596,11 +606,11 @@ async function ensureOffscreenDocument() {
   );
 
   if (offscreenExists) {
-    console.log('[SW] Offscreen document already exists');
+    dbg('[SW] Offscreen document already exists');
     return;
   }
 
-  console.log('[SW] Creating offscreen document');
+  dbg('[SW] Creating offscreen document');
   await chrome.offscreen.createDocument({
     url: 'offscreen.html',
     reasons: ['USER_MEDIA'],
@@ -616,7 +626,7 @@ async function closeOffscreenDocument() {
     );
     if (offscreenExists) {
       await chrome.offscreen.closeDocument();
-      console.log('[SW] Offscreen document closed');
+      dbg('[SW] Offscreen document closed');
     }
   } catch (e) {
     console.warn('[SW] Error closing offscreen document:', e);
@@ -627,7 +637,7 @@ async function ensureContentScript(tabId) {
   // Always inject. content.js's init() is idempotent — if the host element
   // already exists it returns immediately. A fresh injection guarantees the
   // message listener is wired to the current extension context, not a stale one.
-  console.log('[SW] Ensuring content script in tab', tabId);
+  dbg('[SW] Ensuring content script in tab', tabId);
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -638,4 +648,4 @@ async function ensureContentScript(tabId) {
   }
 }
 
-console.log('[SW] Service worker loaded');
+dbg('[SW] Service worker loaded');
