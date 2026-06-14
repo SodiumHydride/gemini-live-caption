@@ -13,7 +13,7 @@
   const FONT_MAP = { small: '20px', medium: '28px', large: '36px', xlarge: '44px' };
   const FADE_TIMEOUT = 15000;
 
-  let track, linesEl, placeholder, settingsPanel;
+  let linesEl, flowEl, placeholder, settingsPanel;
   let historyPanel, historyScroll, historyOverlay;
   let historyVisible = false;
   let maxLines = 2;
@@ -22,9 +22,6 @@
 
   // Dedup state
   let lastFinalized = '';
-  let currentPartialEl = null;
-  let currentPartialText = '';
-  let lineCount = 0;
 
   // Caption history buffer
   const CAPTION_HISTORY_SIZE = 500;
@@ -32,8 +29,20 @@
 
   // ==================== INIT ====================
   document.addEventListener('DOMContentLoaded', () => {
-    track = document.getElementById('track');
+    // i18n: in the PiP window chrome.* APIs aren't available, so I18N.init()
+    // will fall back to navigator.language. content.js sends the user's
+    // chosen UI language right after opening, overriding the default.
+    if (window.I18N) {
+      I18N.init().then(() => I18N.apply(document));
+    }
+
     linesEl = document.getElementById('lines');
+    const legacyTrack = document.getElementById('track');
+    if (legacyTrack) legacyTrack.remove();
+    flowEl = document.createElement('div');
+    flowEl.className = 'flow';
+    linesEl.appendChild(flowEl);
+    applyViewportSize();
     placeholder = document.getElementById('placeholder');
     settingsPanel = document.getElementById('settings-panel');
     historyPanel = document.getElementById('history-panel');
@@ -64,13 +73,14 @@
     // Settings: font size
     setupSegment('sp-fontsize', 'medium', (val) => {
       document.documentElement.style.setProperty('--cap-font-size', FONT_MAP[val]);
+      applyViewportSize();
       sendSetting('fontSize', val);
     });
 
     // Settings: max lines
-    setupSegment('sp-maxlines', '3', (val) => {
+    setupSegment('sp-maxlines', '2', (val) => {
       maxLines = parseInt(val);
-      resetViewport();
+      applyViewportSize();
       sendSetting('maxLines', maxLines);
     });
 
@@ -206,6 +216,11 @@
     if (s.bilingualMode !== undefined) {
       // bilingualMode state is informational for PiP; rendering handled by content.js
     }
+    if (s.uiLanguage && window.I18N) {
+      // Mirror the popup's UI language. setLang() tries chrome.storage.set
+      // (no-op here, swallowed) and then re-applies translations.
+      I18N.setLang(s.uiLanguage);
+    }
     if (s.maxLines) {
       maxLines = s.maxLines;
       const seg = document.getElementById('sp-maxlines');
@@ -213,121 +228,115 @@
         b.classList.toggle('on', b.dataset.v === String(s.maxLines));
       });
     }
+    if (s.fontSize || s.maxLines) applyViewportSize();
   }
 
-  // ==================== VIEWPORT RESET ====================
-  function resetViewport() {
-    // Remove excess lines if new maxLines is smaller
-    while (lineCount > maxLines && track.firstChild) {
-      track.removeChild(track.firstChild);
-      lineCount--;
+  // ==================== CAPTION VIEWPORT (broadcast-style) ====================
+  const COMMITTED_MAX_CHARS = 600;
+  let committedText = '';
+  let liveText = '';
+
+  function joinSegments(a, b) {
+    const left = (a || '').trim();
+    const right = (b || '').trim();
+    if (!left) return right;
+    if (!right) return left;
+    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]$/.test(left)) return left + right;
+    return left + ' ' + right;
+  }
+
+  function applyViewportSize() {
+    if (!flowEl) return;
+    const lh = measureLineHeightPx();
+    document.documentElement.style.setProperty('--cap-line-h', `${lh}px`);
+    document.documentElement.style.setProperty('--cap-viewport-h', `${lh * maxLines}px`);
+  }
+
+  function measureLineHeightPx() {
+    if (!flowEl) return 28;
+    const cs = getComputedStyle(flowEl);
+    const fontSize = parseFloat(cs.fontSize) || 16;
+    const lh = parseFloat(cs.lineHeight);
+    return Number.isFinite(lh) ? lh : fontSize * 1.4;
+  }
+
+  function computeViewportHeight() {
+    return measureLineHeightPx() * maxLines;
+  }
+
+  function renderCaption() {
+    if (!flowEl) return;
+    const display = joinSegments(committedText, liveText);
+    if (flowEl.textContent !== display) flowEl.textContent = display;
+  }
+
+  function appendCommitted(segment) {
+    const s = segment.trim();
+    if (!s) return;
+    committedText = joinSegments(committedText, s);
+    if (committedText.length > COMMITTED_MAX_CHARS) {
+      committedText = committedText.slice(-COMMITTED_MAX_CHARS);
     }
   }
 
-  // ==================== ADD LINE ====================
-  function addLine(text, originalText) {
-    const el = document.createElement('div');
-    el.className = 'line';
-    el.textContent = text;
-
-    track.appendChild(el);
-    lineCount++;
-
-    if (lineCount > maxLines) {
-      // Smooth scroll: collapse oldest line, remaining lines shift up naturally
-      const oldLine = track.firstChild;
-      if (oldLine && oldLine.parentNode === track) {
-        oldLine.style.transition = 'opacity 0.3s ease-out, max-height 0.3s ease-out, padding 0.3s ease-out';
-        oldLine.style.opacity = '0';
-        oldLine.style.maxHeight = '0';
-        oldLine.style.padding = '0';
-        oldLine.style.overflow = 'hidden';
-        setTimeout(() => {
-          if (oldLine.parentNode === track) track.removeChild(oldLine);
-          lineCount--;
-        }, 300);
-      }
-    }
-  }
-
-  // ==================== SHOW ====================
   function show(text, isFinal, originalText) {
-    if (!text) return;
+    if (!text) {
+      if (!isFinal) {
+        liveText = '';
+        renderCaption();
+      }
+      return;
+    }
 
     if (isFinal) {
-      // Dedup: skip if already finalized this text (trim to handle whitespace differences)
       if (text.trim() === lastFinalized.trim()) return;
-      if (currentPartialEl && currentPartialEl.parentNode === track && text.trim() === currentPartialText.trim()) {
-        lastFinalized = text;
-        currentPartialEl = null;
-        currentPartialText = '';
-        return;
-      }
       lastFinalized = text;
-      currentPartialEl = null;
-      currentPartialText = '';
-      addLine(text);
+      appendCommitted(text);
+      liveText = '';
 
-      // Add to history buffer (with original for bilingual transcript)
       const ts = Date.now();
       captionHistory.push({ text, ts, original: originalText || '' });
       if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
-
-      // If history panel is visible, append new entry
-      if (historyVisible) {
-        appendHistoryEntry(text, ts, originalText);
-      }
+      if (historyVisible) appendHistoryEntry(text, ts, originalText);
     } else {
-      if (currentPartialEl && currentPartialEl.parentNode === track) {
-        currentPartialEl.textContent = text;
-        currentPartialText = text;
-      } else {
-        addLine(text);
-        currentPartialEl = track.lastChild;
-        currentPartialText = text;
-      }
+      liveText = text.trim();
     }
+    renderCaption();
 
     capturing = true;
     placeholder.classList.remove('show');
     linesEl.style.display = '';
+    linesEl.style.opacity = '1';
 
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
       if (capturing) {
         capturing = false;
-        for (const child of Array.from(track.children)) {
-          child.style.opacity = '0';
-          child.style.maxHeight = '0';
-        }
+        linesEl.style.opacity = '0';
         setTimeout(() => {
-          if (!capturing) {
-            clearTrack();
-            placeholder.classList.add('show');
-          }
-        }, 400);
+          if (!capturing) clearTrack();
+        }, 280);
       }
     }, FADE_TIMEOUT);
   }
 
-  // ==================== CLEAR ====================
   function clearCaptions() {
     clearTimeout(fadeTimer);
-    for (const child of Array.from(track.children)) {
-      child.style.opacity = '0';
-      child.style.maxHeight = '0';
-    }
-    setTimeout(clearTrack, 400);
+    linesEl.style.opacity = '0';
+    setTimeout(clearTrack, 280);
     capturing = false;
   }
 
   function clearTrack() {
-    while (track.firstChild) track.removeChild(track.firstChild);
-    lineCount = 0;
-    linesEl.style.display = 'none';
+    committedText = '';
+    liveText = '';
+    lastFinalized = '';
+    if (flowEl) flowEl.textContent = '';
+    if (linesEl) {
+      linesEl.style.opacity = '1';
+      linesEl.style.display = 'none';
+    }
     placeholder.classList.add('show');
-    currentPartialEl = null;
-    currentPartialText = '';
   }
 
   // ==================== HISTORY PANEL ====================
@@ -371,16 +380,10 @@
       fadeTimer = setTimeout(() => {
         if (capturing) {
           capturing = false;
-          for (const child of Array.from(track.children)) {
-            child.style.opacity = '0';
-            child.style.maxHeight = '0';
-          }
+          linesEl.style.opacity = '0';
           setTimeout(() => {
-            if (!capturing) {
-              clearTrack();
-              placeholder.classList.add('show');
-            }
-          }, 400);
+            if (!capturing) clearTrack();
+          }, 280);
         }
       }, FADE_TIMEOUT);
     }

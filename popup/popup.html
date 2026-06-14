@@ -12,16 +12,16 @@
     <div class="disclaimer" id="disclaimer" style="display:none">
       <div class="disclaimer-icon">⚠️</div>
       <div class="disclaimer-text">
-        <strong>Before you start</strong>
-        <p>This extension captures tab audio and sends it to Google for translation. By using it, you agree to <a href="https://ai.google.dev/terms" target="_blank">Google's Terms of Service</a>.</p>
+        <strong data-i18n="disclaimer_title">Before you start</strong>
+        <p data-i18n-html="disclaimer_body_html">This extension captures tab audio and sends it to Google for translation. By using it, you agree to <a href="https://ai.google.dev/terms" target="_blank" rel="noopener">Google's Terms of Service</a>.</p>
         <ul>
-          <li>Do not capture copyrighted content without permission</li>
-          <li>Do not record private conversations without consent</li>
-          <li>Free API keys: Google may use your data for model training</li>
-          <li>You must be 18+ to use this extension (Google API requirement)</li>
+          <li data-i18n="disclaimer_rule_copyright">Do not capture copyrighted content without permission</li>
+          <li data-i18n="disclaimer_rule_privacy">Do not record private conversations without consent</li>
+          <li data-i18n="disclaimer_rule_freekey">Free API keys: Google may use your data for model training</li>
+          <li data-i18n="disclaimer_rule_age">You must be 18+ to use this extension (Google API requirement)</li>
         </ul>
       </div>
-      <button class="disclaimer-btn" id="acceptDisclaimer">I Understand</button>
+      <button class="disclaimer-btn" id="acceptDisclaimer" data-i18n="disclaimer_accept">I Understand</button>
     </div>
 
     <!-- Header -->
@@ -31,67 +31,67 @@
           <img src="../icon-128.png" width="28" height="28" alt="Gemini Live Caption">
         </div>
         <div class="logo-text">
-          <h1>Gemini Live Caption</h1>
-          <p class="subtitle">AI-powered real-time translation</p>
+          <h1 data-i18n="app_name">Gemini Live Caption</h1>
+          <p class="subtitle" data-i18n="app_subtitle">AI-powered real-time translation</p>
         </div>
       </div>
       <div class="status-badge" id="statusBadge">
         <span class="status-dot"></span>
-        <span class="status-text">Ready</span>
+        <span class="status-text" data-i18n="status_ready">Ready</span>
       </div>
     </header>
 
     <!-- Toggle Button -->
     <button class="toggle-btn" id="toggleBtn">
       <span class="toggle-icon" id="toggleIcon">▶</span>
-      <span class="toggle-label" id="toggleLabel">Start Caption</span>
+      <span class="toggle-label" id="toggleLabel" data-i18n="toggle_start">Start Caption</span>
     </button>
 
     <div class="divider"></div>
 
     <!-- Display Mode -->
     <div class="setting-group">
-      <label class="setting-label">🖥️ Display Mode</label>
+      <label class="setting-label" data-i18n="display_mode_label">🖥️ Display Mode</label>
       <div class="display-mode-info">
-        <p class="mode-hint">Click the PiP button on the subtitle overlay to open floating window</p>
-        <p class="mode-hint-sub">PiP window stays visible when you switch tabs</p>
+        <p class="mode-hint" data-i18n="display_mode_hint">Click the PiP button on the subtitle overlay to open floating window</p>
+        <p class="mode-hint-sub" data-i18n="display_mode_hint_sub">PiP window stays visible when you switch tabs</p>
       </div>
     </div>
 
     <!-- Settings -->
     <div class="settings">
+      <!-- UI Language -->
+      <div class="setting-group">
+        <label class="setting-label" for="uiLanguage" data-i18n="setting_ui_language">🌎 Interface Language</label>
+        <select id="uiLanguage" class="setting-select">
+          <!-- Options populated dynamically from I18N.SUPPORTED -->
+        </select>
+      </div>
+
       <!-- API Key -->
       <div class="setting-group">
-        <label class="setting-label" for="apiKey">🔑 API Key</label>
+        <label class="setting-label" for="apiKey">
+          <span data-i18n="setting_api_key">🔑 API Key</span>
+          <a class="label-link" id="getKeyLink" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer" data-i18n="setting_get_key">Get a free key →</a>
+        </label>
         <div class="input-wrapper">
-          <input type="password" id="apiKey" class="setting-input" placeholder="Enter your Gemini API key" autocomplete="off">
-          <button class="eye-btn" id="toggleApiKey" title="Show/hide API key">👁</button>
+          <input type="password" id="apiKey" class="setting-input" placeholder="Enter your Gemini API key" data-i18n-attr="placeholder:setting_api_key_placeholder" autocomplete="off">
+          <button class="eye-btn" id="toggleApiKey" title="Show/hide API key" data-i18n-attr="title:setting_api_key_show_hide">👁</button>
         </div>
       </div>
 
       <!-- Target Language -->
       <div class="setting-group">
-        <label class="setting-label" for="targetLanguage">🌐 Target Language</label>
+        <label class="setting-label" for="targetLanguage" data-i18n="setting_target_language">🌐 Target Language</label>
         <select id="targetLanguage" class="setting-select">
-          <option value="zh-Hans">中文 (简体)</option>
-          <option value="zh-Hant">中文 (繁體)</option>
-          <option value="en">English</option>
-          <option value="ja">日本語</option>
-          <option value="ko">한국어</option>
-          <option value="es">Español</option>
-          <option value="fr">Français</option>
-          <option value="de">Deutsch</option>
-          <option value="ru">Русский</option>
-          <option value="pt-BR">Português (BR)</option>
-          <option value="pt-PT">Português (PT)</option>
-          <option value="ar">العربية</option>
-          <option value="hi">हिन्दी</option>
+          <!-- Options are populated dynamically in popup.js from the full
+               gemini-3.5-live-translate-preview language list (70+ languages). -->
         </select>
       </div>
 
       <!-- Font Size -->
       <div class="setting-group">
-        <label class="setting-label">📏 Font Size</label>
+        <label class="setting-label" data-i18n="setting_font_size">📏 Font Size</label>
         <div class="segmented-control" id="fontSizeControl">
           <button class="seg-btn" data-value="small">S</button>
           <button class="seg-btn active" data-value="medium">M</button>
@@ -101,81 +101,87 @@
 
       <!-- Max Lines -->
       <div class="setting-group">
-        <label class="setting-label">📐 Max Lines</label>
+        <label class="setting-label" data-i18n="setting_max_lines">📐 Max Lines</label>
         <div class="segmented-control" id="maxLinesControl">
-          <button class="seg-btn" data-value="2">2</button>
-          <button class="seg-btn active" data-value="3">3</button>
+          <button class="seg-btn active" data-value="2">2</button>
+          <button class="seg-btn" data-value="3">3</button>
           <button class="seg-btn" data-value="4">4</button>
         </div>
       </div>
 
       <!-- Opacity -->
       <div class="setting-group">
-        <label class="setting-label">🎨 Background Opacity <span id="opacityValue" class="setting-value">75%</span></label>
+        <label class="setting-label"><span data-i18n="setting_bg_opacity">🎨 Background Opacity</span> <span id="opacityValue" class="setting-value">75%</span></label>
         <input type="range" id="bgOpacity" class="setting-range" min="0" max="100" value="75">
       </div>
 
       <!-- Audio Gain -->
       <div class="setting-group">
-        <label class="setting-label">🔊 Audio Gain <span id="gainValue" class="setting-value">1.0x</span></label>
+        <label class="setting-label"><span data-i18n="setting_audio_gain">🔊 Audio Gain</span> <span id="gainValue" class="setting-value">1.0x</span></label>
         <input type="range" id="audioGain" class="setting-range" min="10" max="50" value="10" step="1">
       </div>
 
       <!-- Noise Gate -->
       <div class="setting-group">
-        <label class="setting-label">🔇 Noise Gate <span id="gateValue" class="setting-value">Off</span></label>
+        <label class="setting-label"><span data-i18n="setting_noise_gate">🔇 Noise Gate</span> <span id="gateValue" class="setting-value" data-i18n="noise_gate_off">Off</span></label>
         <input type="range" id="noiseGate" class="setting-range" min="0" max="50" value="0" step="1">
       </div>
 
       <!-- Bilingual Mode -->
       <div class="setting-group">
         <label class="setting-label toggle-label">
-          🌍 Bilingual Mode
+          <span data-i18n="setting_bilingual">🌍 Bilingual Mode</span>
           <input type="checkbox" id="bilingualMode" class="toggle-checkbox">
           <span class="toggle-switch"></span>
         </label>
-        <p class="setting-hint">Show original language alongside translation</p>
+        <p class="setting-hint" data-i18n="setting_bilingual_hint">Show original language alongside translation</p>
       </div>
 
       <!-- Caption Position -->
       <div class="setting-group">
-        <label class="setting-label">📍 Caption Position</label>
+        <label class="setting-label" data-i18n="setting_caption_position">📍 Caption Position</label>
         <div class="position-grid" id="positionControl">
-          <button class="pos-btn" data-value="top-left" title="Top Left">↖</button>
-          <button class="pos-btn" data-value="top-center" title="Top Center">↑</button>
-          <button class="pos-btn" data-value="top-right" title="Top Right">↗</button>
-          <button class="pos-btn" data-value="bottom-left" title="Bottom Left">↙</button>
-          <button class="pos-btn active" data-value="bottom-center" title="Bottom Center">↓</button>
-          <button class="pos-btn" data-value="bottom-right" title="Bottom Right">↘</button>
+          <button class="pos-btn" data-value="top-left" title="Top Left" data-i18n-attr="title:position_top_left">↖</button>
+          <button class="pos-btn" data-value="top-center" title="Top Center" data-i18n-attr="title:position_top_center">↑</button>
+          <button class="pos-btn" data-value="top-right" title="Top Right" data-i18n-attr="title:position_top_right">↗</button>
+          <button class="pos-btn" data-value="bottom-left" title="Bottom Left" data-i18n-attr="title:position_bottom_left">↙</button>
+          <button class="pos-btn active" data-value="bottom-center" title="Bottom Center" data-i18n-attr="title:position_bottom_center">↓</button>
+          <button class="pos-btn" data-value="bottom-right" title="Bottom Right" data-i18n-attr="title:position_bottom_right">↘</button>
         </div>
       </div>
 
       <!-- Text Color -->
       <div class="setting-group">
-        <label class="setting-label">✏️ Text Color</label>
+        <label class="setting-label" data-i18n="setting_text_color">✏️ Text Color</label>
         <div class="color-picker" id="textColorControl">
-          <button class="color-btn active" data-value="#ffffff" title="White" style="background:#ffffff"></button>
-          <button class="color-btn" data-value="#f0f0f0" title="Light Gray" style="background:#f0f0f0"></button>
-          <button class="color-btn" data-value="#ffeb3b" title="Yellow" style="background:#ffeb3b"></button>
-          <button class="color-btn" data-value="#4fc3f7" title="Light Blue" style="background:#4fc3f7"></button>
-          <button class="color-btn" data-value="#81c784" title="Light Green" style="background:#81c784"></button>
-          <button class="color-btn" data-value="#ff8a65" title="Orange" style="background:#ff8a65"></button>
+          <button class="color-btn active" data-value="#ffffff" title="White" data-i18n-attr="title:color_white" style="background:#ffffff"></button>
+          <button class="color-btn" data-value="#f0f0f0" title="Light Gray" data-i18n-attr="title:color_light_gray" style="background:#f0f0f0"></button>
+          <button class="color-btn" data-value="#ffeb3b" title="Yellow" data-i18n-attr="title:color_yellow" style="background:#ffeb3b"></button>
+          <button class="color-btn" data-value="#4fc3f7" title="Light Blue" data-i18n-attr="title:color_light_blue" style="background:#4fc3f7"></button>
+          <button class="color-btn" data-value="#81c784" title="Light Green" data-i18n-attr="title:color_light_green" style="background:#81c784"></button>
+          <button class="color-btn" data-value="#ff8a65" title="Orange" data-i18n-attr="title:color_orange" style="background:#ff8a65"></button>
         </div>
       </div>
     </div>
 
     <!-- Export -->
     <div class="export-section">
-      <button class="export-btn" id="exportCaptions">Export Subtitles (SRT)</button>
-      <button class="export-btn secondary" id="exportLogs">Export Logs</button>
+      <button class="export-btn" id="exportCaptions" data-i18n="export_subtitles">Export Subtitles (SRT)</button>
+      <button class="export-btn secondary" id="exportLogs" data-i18n="export_logs">Export Logs</button>
     </div>
 
     <!-- Footer -->
     <div class="footer">
-      <span class="shortcut-hint">⌨️ Press <kbd>Alt+C</kbd> to toggle</span>
+      <span class="shortcut-hint" data-i18n-html="shortcut_hint_html">⌨️ Press <kbd>Alt+C</kbd> to toggle</span>
+      <a class="github-cta" id="githubLink" href="https://github.com/SodiumHydride/gemini-live-caption" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span data-i18n="github_cta">Star on GitHub</span>
+      </a>
     </div>
   </div>
 
+  <!-- i18n must load before popup.js so the runtime is available -->
+  <script src="../i18n.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

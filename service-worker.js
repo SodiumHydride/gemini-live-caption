@@ -660,11 +660,12 @@ async function ensureContentScript(tabId) {
   // Always inject. content.js's init() is idempotent — if the host element
   // already exists it returns immediately. A fresh injection guarantees the
   // message listener is wired to the current extension context, not a stale one.
+  // i18n.js is injected first so window.I18N is available to content.js.
   dbg('[SW] Ensuring content script in tab', tabId);
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['content.js'],
+      files: ['i18n.js', 'content.js'],
     });
   } catch (e) {
     console.warn('[SW] Content script injection:', e.message);

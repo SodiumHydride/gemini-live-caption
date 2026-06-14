@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Gemini Live Caption",
   "version": "1.0.0",
-  "description": "Real-time AI-powered subtitle translation using Gemini Live API. Replaces Chrome's native Live Caption with Gemini translation.",
+  "description": "Real-time translated captions for any tab audio — end-to-end Gemini 3.5 Live Translate, 70+ languages, Picture-in-Picture.",
   "author": "NaH",
   "homepage_url": "https://github.com/SodiumHydride/gemini-live-caption",
   "minimum_chrome_version": "116",
@@ -37,7 +37,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["pip.html", "pip.css", "pip.js"],
+      "resources": ["pip.html", "pip.css", "pip.js", "i18n.js"],
       "matches": ["<all_urls>"]
     }
   ]

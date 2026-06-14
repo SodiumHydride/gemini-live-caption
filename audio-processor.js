@@ -33,7 +33,14 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
 
     // Audio processing parameters (adjustable via port messages)
     this.gain = 1.0;        // Multiplier applied to input samples before processing
-    this.noiseGate = 0;     // RMS threshold; chunks below this are zeroed
+    this.noiseGate = 0;     // RMS threshold; blocks below this are zeroed (with hangover)
+
+    // Noise-gate hangover: once speech is detected, keep the gate open for a
+    // short tail so soft word endings / low-energy onsets aren't clipped.
+    // Assumes the AudioWorklet render quantum of 128 samples per process() call.
+    this.GATE_HANGOVER_MS = 250;
+    this.gateHangoverFrames = Math.ceil((this.GATE_HANGOVER_MS / 1000) * this.sampleRate / 128);
+    this.gateHold = 0;
 
     this.port.onmessage = (e) => {
       if (e.data.gain !== undefined) this.gain = e.data.gain;
@@ -109,20 +116,27 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     let channelData = input[0]; // Mono, 128 samples per call
     if (!channelData) return true;
 
-    // Apply gain amplification in-place (only affects audio sent to model, not playback)
+    // Apply gain in-place (only affects audio sent to the model, not playback).
+    // Use a soft limiter instead of hard clipping so loud peaks don't distort —
+    // hard clamping injects harmonics that degrade recognition/translation.
     if (this.gain !== 1.0) {
       for (let i = 0; i < channelData.length; i++) {
-        channelData[i] = Math.max(-1, Math.min(1, channelData[i] * this.gain));
+        channelData[i] = this._softClip(channelData[i] * this.gain);
       }
     }
 
-    // Noise gate: zero out chunks below RMS threshold (in-place)
+    // Noise gate with hangover: zero out blocks below the RMS threshold, but keep
+    // the gate open for a short tail after speech so soft endings aren't clipped.
     if (this.noiseGate > 0) {
       let sumSq = 0;
       for (let i = 0; i < channelData.length; i++) sumSq += channelData[i] * channelData[i];
       const rms = Math.sqrt(sumSq / channelData.length);
-      if (rms < this.noiseGate) {
-        channelData.fill(0); // silent chunk in-place
+      if (rms >= this.noiseGate) {
+        this.gateHold = this.gateHangoverFrames; // speech — open & refresh hold
+      } else if (this.gateHold > 0) {
+        this.gateHold--;                         // within hangover — keep passing
+      } else {
+        channelData.fill(0);                     // silence — gate closed
       }
     }
 
@@ -218,6 +232,16 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
       type: 'audio-data',
       samples: this.outputBuffer.slice(0),
     });
+  }
+
+  // Soft limiter: linear below the knee, smoothly compressed above it so the
+  // signal asymptotically approaches ±1 instead of hard-clipping (which would
+  // inject harmonic distortion and hurt transcription quality).
+  _softClip(x) {
+    const t = 0.95;
+    if (x > t) return t + (1 - t) * Math.tanh((x - t) / (1 - t));
+    if (x < -t) return -t - (1 - t) * Math.tanh((-x - t) / (1 - t));
+    return x;
   }
 
   // === FIR Filter Design (Kaiser Window) ===

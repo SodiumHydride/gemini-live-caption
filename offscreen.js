@@ -62,6 +62,8 @@ let currentSettings = {};
 let isReconnecting = false;
 let resumptionHandle = null;
 let wsConnectTimeoutId = null;
+let standbyWebsocket = null;   // warmed-up connection during hot-swap rotation
+let isRotating = false;        // a make-before-break rotation is in progress
 
 // Device change detection
 let currentOutputDeviceId = null;
@@ -91,10 +93,13 @@ const CONFIG = {
   // Device change
   DEVICE_CHANGE_DEBOUNCE_MS: 300,
 
-  // Transcription processing
-  GAP_FLUSH_MS: 700,               // Flush after 700ms of no new text
-  MIN_FLUSH_CHARS: 10,             // Minimum chars before punctuation flush
-  BUFFER_OVERFLOW_LIMIT: 150,      // Force flush at 150 chars
+  // Transcription processing — sentence-aware segmentation
+  GAP_FLUSH_MS: 1200,              // Finalize the current line after 1.2s of silence (was 700)
+  MIN_SENTENCE_CHARS: 2,           // A sentence-ending punct finalizes even a short line (≥ this)
+  MIN_FLUSH_CHARS: 10,             // Min length for a comma soft-break / gap fallback flush
+  SOFT_WRAP_CHARS: 56,             // Only break at a comma once the line is at least this long
+  BUFFER_OVERFLOW_LIMIT: 140,      // Hard cap; break at nearest punct/space when exceeded
+  PARTIAL_MIN_INTERVAL_MS: 120,    // Throttle live (partial) caption refreshes to reduce flicker
 
   // Heartbeat
   HEARTBEAT_INTERVAL_MS: 20000,    // 20s heartbeat to keep SW alive
@@ -290,7 +295,17 @@ async function startCapture(streamId, settings) {
 
 function stopCapture() {
   isCapturing = false;
+  isRotating = false;
   wsGeneration++;  // Invalidate any in-flight WebSocket connections
+
+  if (standbyWebsocket) {
+    try {
+      standbyWebsocket.onopen = standbyWebsocket.onmessage = null;
+      standbyWebsocket.onerror = standbyWebsocket.onclose = null;
+      standbyWebsocket.close();
+    } catch (e) {}
+    standbyWebsocket = null;
+  }
 
   _stopDeviceMonitoring();
   stopCaptionWatchdog();
@@ -309,6 +324,11 @@ function stopCapture() {
   if (gapFlushTimer) {
     clearTimeout(gapFlushTimer);
     gapFlushTimer = null;
+  }
+
+  if (partialThrottleTimer) {
+    clearTimeout(partialThrottleTimer);
+    partialThrottleTimer = null;
   }
 
   if (reconnectTimer) {
@@ -375,13 +395,27 @@ async function connectWebSocket() {
     ws.onerror = (error) => {
       if (gen !== wsGeneration) return;
       console.error('[Offscreen] WebSocket error:', error);
-      sendStatus('error', 'WebSocket connection error');
-      if (!setupComplete) reject(new Error('WebSocket connection failed'));
+      if (!setupComplete) {
+        // Failed before the session was ever established — almost always a bad
+        // API key or no network. Fail fast with a clear, user-facing message.
+        if (wsConnectTimeoutId) { clearTimeout(wsConnectTimeoutId); wsConnectTimeoutId = null; }
+        reject(new Error('Check your API key or network connection.'));
+      } else {
+        sendStatus('error', 'WebSocket connection error');
+      }
     };
 
     ws.onclose = (event) => {
       if (gen !== wsGeneration) return;
       dbg(`WebSocket closed: code=${event.code}, isCapturing: ${isCapturing}`);
+      if (!setupComplete) {
+        // Closed before setup ever completed — fail fast instead of waiting for
+        // the 15s connect timeout. Reject so the caller surfaces the error (on
+        // first connect) or schedules a retry (on the reconnect path).
+        if (wsConnectTimeoutId) { clearTimeout(wsConnectTimeoutId); wsConnectTimeoutId = null; }
+        reject(new Error('Check your API key or network connection.'));
+        return;
+      }
       if (isCapturing) {
         sendStatus('reconnecting', 'Connection lost, reconnecting...');
         scheduleReconnect();
@@ -432,14 +466,11 @@ function processMessage(text, resolve, reject) {
   }
 }
 
-function sendSetupMessage() {
+function buildSetupMessage() {
   const targetLang = currentSettings.targetLanguage || 'zh-Hans';
 
   // Setup format for gemini-3.5-live-translate-preview
   // See: https://ai.google.dev/gemini-api/docs/live-api/live-translate
-  //
-  // Key: contextWindowCompression enables unlimited session duration.
-  // Session resumption allows reconnecting with context preserved.
   const setupConfig = {
     model: 'models/gemini-3.5-live-translate-preview',
     generationConfig: {
@@ -451,7 +482,7 @@ function sendSetupMessage() {
     },
     inputAudioTranscription: {},
     outputAudioTranscription: {},
-    // Session resumption: reconnect with handle to preserve context across the
+    // Session resumption: reconnect with a handle to preserve context across the
     // ~10 min session limit. Does NOT degrade translation quality.
     // NOTE: contextWindowCompression is intentionally omitted — it causes
     // audio freezes (#1225) and premature turnComplete (#1227).
@@ -460,16 +491,15 @@ function sendSetupMessage() {
 
   // If we have a resumption handle from a previous session, include it
   if (resumptionHandle) {
-    setupConfig.sessionResumption = {
-      handle: resumptionHandle,
-    };
-    dbg(`Reconnecting with resumption handle: ${resumptionHandle.substring(0, 20)}...`);
+    setupConfig.sessionResumption = { handle: resumptionHandle };
   }
 
-  const setupMsg = { setup: setupConfig };
+  return { setup: setupConfig };
+}
 
-  websocket.send(JSON.stringify(setupMsg));
-  dbg(`Setup sent: live-translate → ${targetLang}`);
+function sendSetupMessage() {
+  websocket.send(JSON.stringify(buildSetupMessage()));
+  dbg(`Setup sent: live-translate → ${currentSettings.targetLanguage || 'zh-Hans'}`);
 }
 
 // ==================== AUDIO STREAMING ====================
@@ -485,14 +515,14 @@ function sendAudioToGemini(float32Samples) {
 
   const base64 = arrayBufferToBase64(int16.buffer);
 
+  // Official live-translate frame shape (2026 docs): realtimeInput.audio holds a
+  // single PCM Blob. The legacy realtimeInput.mediaChunks[] array is deprecated.
   const audioMsg = {
     realtimeInput: {
-      mediaChunks: [
-        {
-          data: base64,
-          mimeType: 'audio/pcm;rate=16000',
-        },
-      ],
+      audio: {
+        data: base64,
+        mimeType: 'audio/pcm;rate=16000',
+      },
     },
   };
 
@@ -522,19 +552,79 @@ let partialText = '';
 let partialInputText = '';
 let bilingualMode = false;
 let gapFlushTimer = null;
-// Punctuation-based segmentation: flush at first punctuation after MIN_FLUSH_CHARS
+let lastPartialSentTime = 0;
+let partialThrottleTimer = null;
+// Sentence-aware segmentation.
+//   1. Finalize at a sentence-ending punctuation (。！？.!? …) — a real sentence
+//      boundary, kept with any trailing quotes/brackets. Even short sentences
+//      finalize (MIN_SENTENCE_CHARS) so brief lines don't merge into the next.
+//   2. Commas/semicolons only break once the line is past SOFT_WRAP_CHARS, so a
+//      sentence isn't chopped into tiny lines while still capping line length.
+// CJK enders split anywhere; ASCII .!? require a trailing space/end so we don't
+// split decimals (1.5) or break mid-token.
+const SENTENCE_END_RE = /[。！？…]+["'”’)\]】»」』]*|[.!?]+["'”’)\]]*(?=\s|$)/g;
+const SOFT_BREAK_RE = /[，,、；;]/g;
+
+function flushFinal(cutAt) {
+  if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
+  sendCaption(partialText.substring(0, cutAt).trim(), true);
+  partialText = partialText.substring(cutAt);
+  // Immediately surface the remaining tail as the new active line so a soft-wrap
+  // split reads as "line 1 locked, line 2 continuing" instead of a brief shrink.
+  if (partialText.trim()) sendPartialThrottled();
+}
+
+// Throttle partial (non-final) caption updates so the live line refreshes
+// smoothly instead of flickering on every tiny transcription delta. A leading
+// update fires immediately; further deltas within the window collapse into one
+// trailing update that always sends the latest text.
+function sendPartialThrottled() {
+  const text = partialText.trim();
+  if (!text) return;
+  const elapsed = Date.now() - lastPartialSentTime;
+  if (elapsed >= CONFIG.PARTIAL_MIN_INTERVAL_MS) {
+    lastPartialSentTime = Date.now();
+    sendCaption(text, false);
+  } else if (!partialThrottleTimer) {
+    partialThrottleTimer = setTimeout(() => {
+      partialThrottleTimer = null;
+      const latest = partialText.trim();
+      if (latest) {
+        lastPartialSentTime = Date.now();
+        sendCaption(latest, false);
+      }
+    }, CONFIG.PARTIAL_MIN_INTERVAL_MS - elapsed);
+  }
+}
+
 function tryFlushAtPunctuation() {
-  if (partialText.length < CONFIG.MIN_FLUSH_CHARS) return false;
-  const ends = /[。！？.!?，,]/g;
+  if (partialText.length < CONFIG.MIN_SENTENCE_CHARS) return false;
+
+  // Pass 1: sentence-ending punctuation — finalize even a short complete sentence
+  // so brief utterances ("是的。") don't linger and merge into the next line.
   let m;
-  while ((m = ends.exec(partialText)) !== null) {
-    if (m.index >= CONFIG.MIN_FLUSH_CHARS - 1) {
-      if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
-      sendCaption(partialText.substring(0, m.index + 1).trim(), true);
-      partialText = partialText.substring(m.index + 1);
+  SENTENCE_END_RE.lastIndex = 0;
+  while ((m = SENTENCE_END_RE.exec(partialText)) !== null) {
+    const end = m.index + m[0].length;
+    if (end >= CONFIG.MIN_SENTENCE_CHARS) {
+      flushFinal(end);
       return true;
     }
   }
+
+  // Pass 2: soft break at comma/semicolon, but only on an already-long line.
+  if (partialText.length >= CONFIG.SOFT_WRAP_CHARS) {
+    let lastIdx = -1;
+    SOFT_BREAK_RE.lastIndex = 0;
+    while ((m = SOFT_BREAK_RE.exec(partialText)) !== null) {
+      if (m.index + 1 >= CONFIG.MIN_FLUSH_CHARS) lastIdx = m.index + 1;
+    }
+    if (lastIdx > 0) {
+      flushFinal(lastIdx);
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -602,9 +692,12 @@ function handleServerContent(sc) {
     return;
   }
 
+  // Text source: in live-translate (AUDIO-only) mode the translated text always
+  // arrives via outputTranscription. modelTurn.parts carry the translated AUDIO
+  // (inlineData), which this extension does not play — so there is no separate
+  // text stream to merge. Keeping a single source avoids duplicated/garbled text.
   handleOutputTranscription(sc);
   handleInputTranscription(sc);
-  handleModelTurn(sc);
   handleSegmentation(sc);
   handleTurnComplete(sc);
   handleBufferOverflow();
@@ -639,13 +732,15 @@ function handleOutputTranscription(sc) {
 
   partialText += sc.outputTranscription.text;
   resetCaptionWatchdog();
-  if (partialText.trim()) sendCaption(partialText.trim(), false);
+  sendPartialThrottled();
 
   // Restart gap timer on each text arrival
   if (gapFlushTimer) clearTimeout(gapFlushTimer);
   gapFlushTimer = setTimeout(() => {
     gapFlushTimer = null;
-    if (!tryFlushAtPunctuation() && partialText.trim().length >= CONFIG.MIN_FLUSH_CHARS) {
+    // After a real pause, finalize the buffered line even if it's short, so a
+    // brief utterance doesn't linger and merge into the next one.
+    if (!tryFlushAtPunctuation() && partialText.trim().length > 0) {
       sendCaption(partialText.trim(), true);
       partialText = '';
     }
@@ -660,31 +755,6 @@ function handleInputTranscription(sc) {
   resetCaptionWatchdog();
 }
 
-function handleModelTurn(sc) {
-  if (!sc.modelTurn || !sc.modelTurn.parts) return;
-
-  for (const part of sc.modelTurn.parts) {
-    if (!part.text) continue;
-    // Length-based dedup: skip if incoming text is no longer than what we have.
-    // For overlaps, find the longest suffix of partialText matching a prefix of part.text.
-    if (part.text.length <= partialText.length) continue;
-    let appendFrom = 0;
-    const maxCheck = Math.min(partialText.length, part.text.length);
-    for (let len = maxCheck; len > 0; len--) {
-      if (partialText.endsWith(part.text.substring(0, len))) {
-        appendFrom = len;
-        break;
-      }
-    }
-    if (appendFrom < part.text.length) {
-      partialText += part.text.substring(appendFrom);
-    }
-  }
-  if (partialText.trim()) {
-    sendCaption(partialText.trim(), false);
-  }
-}
-
 function handleSegmentation(sc) {
   tryFlushAtPunctuation();
 }
@@ -692,7 +762,9 @@ function handleSegmentation(sc) {
 function handleTurnComplete(sc) {
   if (!sc.outputTranscription?.finished && !sc.turnComplete && !sc.waitingForInput) return;
 
-  if (partialText.trim().length < CONFIG.MIN_FLUSH_CHARS) return;
+  // A turn boundary finalizes whatever is buffered — even a short sentence — so
+  // the next turn starts on a clean line instead of concatenating onto this one.
+  if (partialText.trim().length === 0) return;
 
   if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
   sendCaption(partialText.trim(), true);
@@ -700,11 +772,20 @@ function handleTurnComplete(sc) {
 }
 
 function handleBufferOverflow() {
-  if (partialText.length <= 150) return;
+  if (partialText.length <= CONFIG.BUFFER_OVERFLOW_LIMIT) return;
 
-  console.warn('[Offscreen] Buffer overflow, force-flushing 150+ chars');
-  sendCaption(partialText.trim(), true);
-  partialText = '';
+  // Prefer a natural break (punctuation or whitespace) at or before the limit so
+  // we never cut mid-word; fall back to a hard cap only if nothing better exists.
+  const limit = CONFIG.BUFFER_OVERFLOW_LIMIT;
+  const breakChars = /[。！？.!?…，,、；;：:\s]/g;
+  let cut = -1;
+  let m;
+  while ((m = breakChars.exec(partialText)) !== null) {
+    if (m.index + 1 <= limit) cut = m.index + 1; else break;
+  }
+  if (cut < CONFIG.MIN_FLUSH_CHARS) cut = limit; // no good break — hard cap
+  console.warn(`[Offscreen] Buffer overflow, flushing ${cut} chars`);
+  flushFinal(cut);
 }
 
 function handleGenerationComplete(sc) {
@@ -755,6 +836,17 @@ function reconnectWebSocket() {
     return;
   }
   isReconnecting = true;
+  isRotating = false;
+
+  // Discard any half-warmed standby connection from an aborted hot-swap.
+  if (standbyWebsocket) {
+    try {
+      standbyWebsocket.onopen = standbyWebsocket.onmessage = null;
+      standbyWebsocket.onerror = standbyWebsocket.onclose = null;
+      standbyWebsocket.close();
+    } catch (e) {}
+    standbyWebsocket = null;
+  }
 
   // Clear any pending scheduled reconnect to avoid orphaned connections
   if (reconnectTimer) {
@@ -797,7 +889,7 @@ function startCaptionWatchdog() {
   stopCaptionWatchdog();
   lastCaptionTime = Date.now();
   captionWatchdogTimer = setInterval(() => {
-    if (!isCapturing || !setupComplete || isReconnecting) return;
+    if (!isCapturing || !setupComplete || isReconnecting || isRotating) return;
     const now = Date.now();
     const sinceCaption = now - lastCaptionTime;
     const sinceAudio = now - lastAudioSendTime;
@@ -830,25 +922,137 @@ function resetCaptionWatchdog() {
 // This is the primary mechanism for seamless long-running captions.
 // The watchdog is the safety net for silent failures.
 
+// Make-before-break rotation: open a fully-initialized standby connection while
+// the current one keeps translating, then atomically switch audio to it and
+// close the old one. This removes the audio/caption gap that a plain
+// close-then-reconnect (reconnectWebSocket) creates. Falls back to a normal
+// reconnect if the standby fails to come up.
+async function rotateSessionHotSwap() {
+  if (!isCapturing || isReconnecting || isRotating) return;
+  if (!websocket || websocket.readyState !== WebSocket.OPEN) {
+    // No healthy active connection to bridge from — just reconnect.
+    reconnectWebSocket();
+    return;
+  }
+  isRotating = true;
+  dbg('Hot-swap rotation: warming up standby connection...');
+
+  const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${currentSettings.apiKey}`;
+  const standby = new WebSocket(wsUrl);
+  standbyWebsocket = standby;
+
+  // Wait until the standby has connected and completed setup.
+  let firstMsg;
+  try {
+    firstMsg = await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (fn, arg) => { if (!settled) { settled = true; clearTimeout(to); fn(arg); } };
+      const to = setTimeout(() => finish(reject, new Error('standby setup timeout')), CONFIG.WS_CONNECT_TIMEOUT_MS);
+
+      standby.onopen = () => {
+        try { standby.send(JSON.stringify(buildSetupMessage())); }
+        catch (e) { finish(reject, e); }
+      };
+      standby.onmessage = (event) => {
+        const handle = (text) => {
+          let msg;
+          try { msg = JSON.parse(text); } catch { return; }
+          if (msg.error) { finish(reject, new Error(msg.error.message || 'standby server error')); return; }
+          finish(resolve, msg); // first non-error message = ready
+        };
+        if (event.data instanceof Blob) event.data.text().then(handle);
+        else handle(event.data);
+      };
+      standby.onerror = () => finish(reject, new Error('standby socket error'));
+      standby.onclose = () => finish(reject, new Error('standby closed before ready'));
+    });
+  } catch (err) {
+    dbg('Hot-swap standby failed, falling back to reconnect:', err.message);
+    try { standby.onopen = standby.onmessage = standby.onerror = standby.onclose = null; standby.close(); } catch (e) {}
+    if (standbyWebsocket === standby) standbyWebsocket = null;
+    isRotating = false;
+    if (isCapturing) reconnectWebSocket();
+    return;
+  }
+
+  // Abort if capture stopped (or another path took over) while warming up.
+  if (!isCapturing || standbyWebsocket !== standby) {
+    try { standby.onopen = standby.onmessage = standby.onerror = standby.onclose = null; standby.close(); } catch (e) {}
+    if (standbyWebsocket === standby) standbyWebsocket = null;
+    isRotating = false;
+    return;
+  }
+
+  // ---- Atomic switch (synchronous; JS single-thread guarantees no interleave) ----
+  const gen = ++wsGeneration;     // new active generation; invalidates the old socket's callbacks
+  const oldWs = websocket;
+
+  // Finalize residual text from the outgoing session so it isn't lost.
+  if (partialText.trim().length >= CONFIG.MIN_FLUSH_CHARS) {
+    sendCaption(partialText.trim(), true);
+  }
+  partialText = '';
+
+  // Rewire the standby to the normal active-connection handlers.
+  standby.onopen = null;
+  standby.onmessage = (event) => {
+    if (gen !== wsGeneration) return;
+    if (event.data instanceof Blob) {
+      event.data.text().then((t) => processMessage(t, () => {}, () => {}));
+    } else {
+      processMessage(event.data, () => {}, () => {});
+    }
+  };
+  standby.onerror = (error) => {
+    if (gen !== wsGeneration) return;
+    console.error('[Offscreen] WebSocket error:', error);
+    sendStatus('error', 'WebSocket connection error');
+  };
+  standby.onclose = (event) => {
+    if (gen !== wsGeneration) return;
+    dbg(`WebSocket closed: code=${event.code}, isCapturing: ${isCapturing}`);
+    if (isCapturing) {
+      sendStatus('reconnecting', 'Connection lost, reconnecting...');
+      scheduleReconnect();
+    }
+  };
+
+  websocket = standby;          // audio now flows to the new connection
+  standbyWebsocket = null;
+  setupComplete = true;         // standby already completed its setup
+
+  // Process the first standby message (may carry a sessionResumptionUpdate).
+  handleGeminiResponse(firstMsg);
+
+  // Break: close the old connection now that the new one is carrying traffic.
+  if (oldWs) {
+    try { oldWs.onclose = null; oldWs.onmessage = null; oldWs.onerror = null; oldWs.close(); } catch (e) {}
+  }
+
+  // Reset session timers for the freshly-rotated session.
+  startCaptionWatchdog();
+  startSessionRotation();
+  isRotating = false;
+  dbg('Hot-swap rotation complete (zero-gap)');
+}
+
 function startSessionRotation() {
   stopSessionRotation();
   sessionStartTime = Date.now();
   sessionRotateTimer = setTimeout(() => {
-    if (!isCapturing || isReconnecting) return;
+    if (!isCapturing || isReconnecting || isRotating) return;
     const uptime = Math.round((Date.now() - sessionStartTime) / 1000);
     dbg(`Session rotation: session alive for ${uptime}s, rotating proactively`);
-    sendStatus('reconnecting', 'Rotating session...');
-    reconnectWebSocket();
+    rotateSessionHotSwap();
   }, CONFIG.SESSION_ROTATE_MS);
 }
 
 function scheduleSessionRotation(delayMs) {
   stopSessionRotation();
   sessionRotateTimer = setTimeout(() => {
-    if (!isCapturing || isReconnecting) return;
+    if (!isCapturing || isReconnecting || isRotating) return;
     dbg('Scheduled session rotation triggered');
-    sendStatus('reconnecting', 'Rotating session...');
-    reconnectWebSocket();
+    rotateSessionHotSwap();
   }, delayMs);
 }
 
@@ -1006,6 +1210,13 @@ let sendMessageFailCount = 0;
 
 function sendCaption(text, isFinal, originalText) {
   if (text) resetCaptionWatchdog();
+  // A finalized line supersedes any pending throttled partial update, so the
+  // just-finalized text can't reappear as a stale live line afterwards.
+  if (isFinal && partialThrottleTimer) {
+    clearTimeout(partialThrottleTimer);
+    partialThrottleTimer = null;
+    lastPartialSentTime = 0;
+  }
   const msg = {
     type: 'CAPTION_UPDATE',
     text,

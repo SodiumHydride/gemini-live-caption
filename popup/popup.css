@@ -379,6 +379,22 @@ body::-webkit-scrollbar-thumb {
   font-variant-numeric: tabular-nums;
 }
 
+/* Inline helper link inside a setting label (e.g. "Get a free key →") */
+.label-link {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-start);
+  text-decoration: none;
+  letter-spacing: 0.02em;
+  transition: color 0.2s ease;
+}
+
+.label-link:hover {
+  color: var(--accent-end);
+  text-decoration: underline;
+}
+
 /* ── Input (API Key) ─────────────────────────────────────── */
 .input-wrapper {
   position: relative;
@@ -742,7 +758,48 @@ body::-webkit-scrollbar-thumb {
   margin-top: 18px;
   padding-top: 14px;
   border-top: 1px solid var(--border-glass);
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.github-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  border: 1px solid var(--border-glass);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  cursor: pointer;
+  transition: color 0.2s var(--ease-out-expo),
+              background 0.2s var(--ease-out-expo),
+              border-color 0.2s var(--ease-out-expo),
+              transform 0.2s var(--ease-out-expo);
+}
+
+.github-cta:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-hover);
+  transform: translateY(-1px);
+}
+
+.github-cta:active {
+  transform: translateY(0) scale(0.98);
+}
+
+.github-cta svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+  flex-shrink: 0;
 }
 
 .shortcut-hint {

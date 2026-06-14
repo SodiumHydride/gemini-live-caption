@@ -1,5 +1,5 @@
 // content.js — Gemini Live Caption Subtitle Overlay
-// True LRC scrolling: track slides up one line-height per new subtitle.
+// Fixed N-line viewport, continuous text, bottom-aligned clip (broadcast-style).
 
 (function () {
   'use strict';
@@ -9,15 +9,14 @@
 
   const HOST_ID = 'gemini-live-caption-host';
   const STORE_KEY = 'captionLayout';
-  let MAX_LINES = 3; // Configurable via popup settings
+  let MAX_LINES = 2; // Fixed visual-line viewport (broadcast-style rolling window)
 
-  let shadow, wrap, linesEl, track, placeholder, pipBtn, statusIndicator;
+  let shadow, wrap, linesEl, flowEl, placeholder, pipBtn, statusIndicator;
   let historyPanel, historyScroll, historyOverlay;
   let historyVisible = false;
   let fadeTimer = null, capturing = false;
   let pipActive = false; // When true, suppress overlay display (PiP is showing captions)
   let layout = { x: null, y: null, w: 560 };
-  let lineCount = 0;
   let initGeneration = 0;  // Prevents stale async callbacks from building on wrong shadow
   let listenerController = null;  // AbortController for document-level listeners
   let hostObserver = null;  // MutationObserver watching for host removal
@@ -31,27 +30,21 @@
   }
 
   // ==================== INIT ====================
-  const FONT_MAP = { small: '2.4vh', medium: '3.2vh', large: '4vh', xlarge: '5vh' };
+  // Sizes lean a touch larger than before: BBC subtitle legibility research
+  // targets ~7-8% of video height per line; the old medium (3.2vh) read small.
+  const FONT_MAP = { small: '2.8vh', medium: '3.6vh', large: '4.6vh', xlarge: '5.8vh' };
 
   function applySettings(s) {
     if (!shadow) return;
     const host = shadow.host;
-    if (s.fontSize) host.style.setProperty('--cap-font-size', FONT_MAP[s.fontSize] ?? FONT_MAP.medium);
+    if (s.fontSize) {
+      host.style.setProperty('--cap-font-size', FONT_MAP[s.fontSize] ?? FONT_MAP.medium);
+    }
     if (s.bgOpacity !== undefined) host.style.setProperty('--cap-bg', `rgba(0,0,0,${s.bgOpacity})`);
     if (s.maxLines) {
       MAX_LINES = s.maxLines;
-      // Recalculate viewport with new limit using tallest line seen
-      if (linesEl && maxLineHeight > 0) {
-        linesEl.style.maxHeight = (maxLineHeight * MAX_LINES) + 'px';
-      }
-      // Trim excess lines if new limit is smaller
-      if (track) {
-        while (lineCount > MAX_LINES && track.firstChild) {
-          track.removeChild(track.firstChild);
-          lineCount--;
-        }
-      }
     }
+    if (s.fontSize || s.maxLines) applyViewportSize();
   }
 
   function init() {
@@ -59,6 +52,12 @@
     if (hostObserver) {
       hostObserver.disconnect();
       hostObserver = null;
+    }
+
+    // Unregister the previous Shadow DOM from i18n so applyAll() doesn't
+    // keep iterating over a detached root.
+    if (window.I18N && shadow) {
+      try { I18N.unregisterRoot(shadow); } catch (e) {}
     }
 
     // Clean up any existing overlay (idempotent — safe for re-injection)
@@ -86,6 +85,12 @@
       if (r.maxLines) MAX_LINES = r.maxLines;
       build();
       applySettings(r);
+      // Wire i18n: register this Shadow DOM so it gets re-translated on UI
+      // language change, then resolve current language and apply.
+      if (window.I18N) {
+        I18N.registerRoot(shadow);
+        I18N.init().then(() => I18N.apply(shadow));
+      }
       dbg('Init complete, MAX_LINES =', MAX_LINES);
     });
 
@@ -155,19 +160,19 @@
       pipBtn.style.display = 'none';
     }
 
-    // Visible window — fixed height set by JS after first line measurement
+    // Fixed N-line viewport; single flowing text block (broadcast-style roll)
     linesEl = document.createElement('div');
     linesEl.className = 'lines';
 
-    // Sliding track inside the window
-    track = document.createElement('div');
-    track.className = 'track';
-    linesEl.appendChild(track);
+    flowEl = document.createElement('div');
+    flowEl.className = 'flow';
+    linesEl.appendChild(flowEl);
 
     // Placeholder when idle
     placeholder = document.createElement('div');
     placeholder.className = 'ph';
-    placeholder.textContent = 'Gemini Live Caption';
+    placeholder.setAttribute('data-i18n', 'app_name');
+    placeholder.textContent = window.I18N ? I18N.t('app_name') : 'Gemini Live Caption';
 
     // Status indicator — small dot + text showing connection state
     statusIndicator = document.createElement('div');
@@ -197,7 +202,8 @@
     historyHeader.className = 'history-header';
     const historyTitle = document.createElement('span');
     historyTitle.className = 'history-title';
-    historyTitle.textContent = 'Transcript';
+    historyTitle.setAttribute('data-i18n', 'overlay_transcript');
+    historyTitle.textContent = window.I18N ? I18N.t('overlay_transcript') : 'Transcript';
     const historyClose = document.createElement('button');
     historyClose.className = 'history-close';
     historyClose.textContent = '×';
@@ -229,6 +235,7 @@
     shadow.appendChild(wrap);
 
     applyPos();
+    applyViewportSize();
     setupDrag(drag);
     setupResize(resize);
   }
@@ -291,25 +298,34 @@
 
       .lines {
         overflow: hidden;
+        box-sizing: border-box;
+        height: var(--cap-viewport-h, auto);
+        max-height: var(--cap-viewport-h, auto);
         background: var(--cap-bg);
         width: 100%;
+        flex-shrink: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        padding: 0 1em;
+        opacity: 1;
+        transition: opacity .25s ease-out;
       }
 
-      .track {
-        transition: transform .35s cubic-bezier(.16,1,.3,1);
-        width: 100%;
-      }
-
-      .line {
+      .flow {
         color: var(--cap-text, #fff);
-        font-size: var(--cap-font-size); font-weight: 500; line-height: 1.45;
-        padding: .3em 1em;
+        font-size: var(--cap-font-size);
+        font-weight: 600;
+        line-height: var(--cap-line-h, 1.4em);
+        padding: 0;
         text-align: center;
-        text-shadow: 0 1px 4px rgba(0,0,0,.9), 0 0 10px rgba(0,0,0,.4);
-        word-break: break-word; white-space: pre-wrap;
-        transition: opacity .25s ease-out, padding .25s ease-out, max-height .25s ease-out;
-        max-height: 10em;
-        overflow: hidden;
+        letter-spacing: .01em;
+        paint-order: stroke fill;
+        -webkit-text-stroke: .5px rgba(0,0,0,.45);
+        text-shadow: 0 1px 3px rgba(0,0,0,.85), 0 0 10px rgba(0,0,0,.35);
+        word-break: keep-all;
+        overflow-wrap: break-word;
+        white-space: normal;
         user-select: text;
         -webkit-user-select: text;
         cursor: text;
@@ -505,129 +521,107 @@
     `;
   }
 
-  // ==================== ADD LINE ====================
-  let maxLineHeight = 0;
+  // ==================== CAPTION VIEWPORT ====================
+  // Broadcast model: one continuous string (committed + live partial) inside a
+  // fixed-height viewport. flex-end + overflow:hidden shows the bottom N visual
+  // lines — no translateY, no per-update animation, no extra DOM layers.
 
-  function addLine(text) {
-    const el = document.createElement('div');
-    el.className = 'line';
-    el.textContent = text;
+  const COMMITTED_MAX_CHARS = 600;
+  let committedText = '';
+  let liveText = '';
+  let lastFinalized = '';
 
-    track.appendChild(el);
-    lineCount++;
+  function joinSegments(a, b) {
+    const left = (a || '').trim();
+    const right = (b || '').trim();
+    if (!left) return right;
+    if (!right) return left;
+    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]$/.test(left)) return left + right;
+    return left + ' ' + right;
+  }
 
-    // Update viewport height based on tallest line seen
-    requestAnimationFrame(() => {
-      const lineH = el.offsetHeight || 32;
-      if (lineH > maxLineHeight) {
-        maxLineHeight = lineH;
-        linesEl.style.maxHeight = (lineH * MAX_LINES) + 'px';
-      }
-    });
+  function measureLineHeightPx() {
+    if (!flowEl) return 28;
+    const cs = getComputedStyle(flowEl);
+    const fontSize = parseFloat(cs.fontSize) || 16;
+    const lh = parseFloat(cs.lineHeight);
+    return Number.isFinite(lh) ? lh : fontSize * 1.4;
+  }
 
-    if (lineCount > MAX_LINES) {
-      // Slide track up by one line height
-      const lineH = el.offsetHeight;
-      track.style.transform = `translateY(-${lineH}px)`;
+  function applyViewportSize() {
+    if (!shadow?.host || !flowEl) return;
+    const lh = measureLineHeightPx();
+    shadow.host.style.setProperty('--cap-line-h', `${lh}px`);
+    shadow.host.style.setProperty('--cap-viewport-h', `${lh * MAX_LINES}px`);
+  }
 
-      // After animation, remove old line and reset track position
-      const oldLine = track.firstChild;
-      function cleanupTransition() {
-        if (oldLine && oldLine.parentNode === track) {
-          track.removeChild(oldLine);
-        }
-        lineCount--;
-        track.style.transition = 'none';
-        track.style.transform = 'translateY(0)';
-        track.offsetHeight; // force reflow
-        track.style.transition = '';
-      }
-      // Wait for transition to complete, then cleanup
-      setTimeout(cleanupTransition, 350);
+  function renderCaption() {
+    if (!flowEl) return;
+    const display = joinSegments(committedText, liveText);
+    if (flowEl.textContent !== display) flowEl.textContent = display;
+  }
+
+  function appendCommitted(segment) {
+    const s = segment.trim();
+    if (!s) return;
+    committedText = joinSegments(committedText, s);
+    if (committedText.length > COMMITTED_MAX_CHARS) {
+      committedText = committedText.slice(-COMMITTED_MAX_CHARS);
     }
   }
 
-  // ==================== SHOW ====================
-  let lastFinalized = '';
-  let currentPartialEl = null;
-  let currentPartialText = '';
-
   function show(text, isFinal, originalText) {
-    if (!text || pipActive) return; // Skip overlay display when PiP is active
+    if (pipActive) return;
 
-    if (isFinal) {
-      // Dedup: skip if already finalized this text (trim to handle whitespace differences)
-      if (text.trim() === lastFinalized.trim()) return;
-
-      // If this finalized text matches what's showing as partial → just mark finalized
-      if (currentPartialEl && currentPartialEl.parentNode === track && text.trim() === currentPartialText.trim()) {
-        lastFinalized = text;
-        currentPartialEl = null;
-        currentPartialText = '';
-        return;
+    if (!text) {
+      if (!isFinal) {
+        liveText = '';
+        renderCaption();
       }
-
-      // Different text → previous partial becomes finalized, add new line
-      lastFinalized = text;
-      currentPartialEl = null;
-      currentPartialText = '';
-      addLine(text);
-    } else {
-      // Partial: update current line in-place (live preview)
-      if (currentPartialEl && currentPartialEl.parentNode === track) {
-        currentPartialEl.textContent = text;
-        currentPartialText = text;
-      } else {
-        addLine(text);
-        currentPartialEl = track.lastChild;
-        currentPartialText = text;
-      }
+      return;
     }
 
-    // Show container, hide placeholder
+    if (isFinal) {
+      if (text.trim() === lastFinalized.trim()) return;
+      lastFinalized = text;
+      appendCommitted(text);
+      liveText = '';
+    } else {
+      liveText = text.trim();
+    }
+    renderCaption();
+
     capturing = true;
     wrap.classList.add('vis');
     placeholder.classList.remove('show');
     linesEl.style.display = '';
+    linesEl.style.opacity = '1';
 
-    // Reset fade timer
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
-      if (capturing) {
-        fadeOutAndClear();
-      }
+      if (capturing) fadeOutAndClear();
     }, 12000);
   }
 
-  // Fade out all lines and clear track after animation
   function fadeOutAndClear() {
     capturing = false;
-    // Fade out individual lines
-    for (const child of Array.from(track.children)) {
-      child.style.opacity = '0';
-      child.style.maxHeight = '0';
-      child.style.padding = '0 1em';
-    }
-    // Hide the entire overlay container (will re-show on next caption via show())
+    linesEl.style.opacity = '0';
     wrap.classList.remove('vis');
     setTimeout(() => {
-      if (!capturing) {
-        clearTrackState();
-      }
-    }, 300);
+      if (!capturing) clearTrackState();
+    }, 280);
   }
 
-  // Clear track DOM and reset state
   function clearTrackState() {
-    while (track.firstChild) track.removeChild(track.firstChild);
-    lineCount = 0;
-    maxLineHeight = 0;
-    linesEl.style.maxHeight = '';
-    track.style.transform = 'translateY(0)';
-    linesEl.style.display = 'none';
+    committedText = '';
+    liveText = '';
+    lastFinalized = '';
+    if (flowEl) flowEl.textContent = '';
+    if (linesEl) {
+      linesEl.style.opacity = '1';
+      linesEl.style.display = 'none';
+    }
     placeholder.classList.add('show');
-    currentPartialEl = null;
-    currentPartialText = '';
   }
 
   // ==================== HISTORY PANEL ====================
@@ -943,6 +937,7 @@
         const w = Math.max(200, Math.min(sw + ev.clientX - sx, innerWidth * .95));
         wrap.style.width = w + 'px';
         layout.w = Math.round(w);
+        applyViewportSize();
       };
       const up = ev => {
         wrap.style.transition = '';
@@ -1013,6 +1008,7 @@
       let html = await response.text();
       html = html
         .replace('href="pip.css"', `href="${chrome.runtime.getURL('pip.css')}"`)
+        .replace('src="i18n.js"', `src="${chrome.runtime.getURL('i18n.js')}"`)
         .replace('src="pip.js"', `src="${chrome.runtime.getURL('pip.js')}"`);
       // Standard Document PiP pattern (per Google docs): write extension-controlled HTML
       // into the PiP window. Source is the extension's own pip.html via chrome.runtime.getURL() -
@@ -1068,6 +1064,8 @@
         if (r.bgOpacity !== undefined) s.bgOpacity = r.bgOpacity;
         if (r.textColor) s.textColor = r.textColor;
         if (r.bilingualMode !== undefined) s.bilingualMode = r.bilingualMode;
+        // Bring PiP in sync with the user's UI language (PiP has no chrome.* access).
+        if (window.I18N) s.uiLanguage = I18N.getLang();
         if (Object.keys(s).length) postToPiP({ type: 'SETTINGS_UPDATE', ...s });
       });
     } catch (err) {
@@ -1156,11 +1154,9 @@
             const oldHost = document.getElementById(HOST_ID);
             if (oldHost) oldHost.remove();
             suppressObserver = false;
-            shadow = wrap = linesEl = track = placeholder = statusIndicator = null;
-            maxLineHeight = 0;
-            lineCount = 0;
-            currentPartialEl = null;
-            currentPartialText = '';
+            shadow = wrap = linesEl = flowEl = placeholder = statusIndicator = null;
+            committedText = '';
+            liveText = '';
             lastFinalized = '';
             init();
           } catch (reinitErr) {
@@ -1243,6 +1239,29 @@
     });
     hostObserver.observe(document.documentElement, { childList: true, subtree: false });
     window[_obsKey] = hostObserver;  // Expose for cross-injection dedup
+  }
+
+  // Relay UI-language changes (driven by popup) to the PiP window so it
+  // localizes in sync.
+  //
+  // Re-injection note: content.js can be injected multiple times into the
+  // same page (extension reload, tab navigation). If we capture postToPiP
+  // directly in the onChange closure, an old listener would keep calling a
+  // stale function bound to a dead pipWindow. So we keep the *latest*
+  // postToPiP behind a Symbol.for slot on window, register the onChange
+  // listener exactly once, and have it dispatch through the current slot.
+  const _postPiPKey = Symbol.for('__geminiCaptionPostPiP');
+  window[_postPiPKey] = (msg) => postToPiP(msg);
+
+  const _i18nCbKey = Symbol.for('__geminiCaptionI18nCbRegistered');
+  if (window.I18N && !window[_i18nCbKey]) {
+    window[_i18nCbKey] = true;
+    I18N.onChange((newLang) => {
+      const post = window[_postPiPKey];
+      if (typeof post === 'function') {
+        post({ type: 'SETTINGS_UPDATE', uiLanguage: newLang });
+      }
+    });
   }
 
   if (document.documentElement) {

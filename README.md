@@ -1,119 +1,169 @@
+<div align="center">
+
+<img src="icon-128.png" width="96" height="96" alt="Gemini Live Caption logo" />
+
 # Gemini Live Caption
+
+**Real-time, translated subtitles for _any_ audio in your browser — powered by Google Gemini.**
+
+[![Manifest V3](https://img.shields.io/badge/Manifest-V3-4285F4?logo=googlechrome&logoColor=white)](manifest.json)
+[![Chrome 116+](https://img.shields.io/badge/Chrome-116%2B-4285F4?logo=googlechrome&logoColor=white)](https://www.google.com/chrome/)
+[![Gemini Live API](https://img.shields.io/badge/Gemini-Live%20Translate-8E75B2?logo=googlegemini&logoColor=white)](https://ai.google.dev/gemini-api/docs/live)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+[![GitHub stars](https://img.shields.io/github/stars/SodiumHydride/gemini-live-caption?style=social)](https://github.com/SodiumHydride/gemini-live-caption)
 
 English | [中文](README_zh.md)
 
-Real-time translated subtitles for any browser tab, powered by Google Gemini.
+[Install](#quick-start) · [Features](#features) · [How it works](#how-it-works) · [Tech highlights](#tech-highlights) · [Roadmap](#roadmap) · [Contributing](#contributing)
 
-Capture tab audio → stream to Gemini Live Translate → display translated captions as a floating overlay with optional Picture-in-Picture window.
+<br/>
+
+<!-- TODO: Replace this placeholder with a real demo.gif (record a YouTube video being captioned + the PiP window). Drop it at docs/demo.gif and update the src below. -->
+<img src="https://placehold.co/820x440/0f0f19/4fc3f7?text=Gemini+Live+Caption+%E2%80%94+Live+Demo" alt="Gemini Live Caption demo" width="820" />
+
+</div>
+
+---
+
+## Why this exists
+
+Chrome's built-in Live Caption only **transcribes English** — it doesn't translate. Most live streams, podcasts, lectures, and meetings have **no subtitle track at all**. And web-page translators don't touch audio.
+
+**Gemini Live Caption** captures the audio of any browser tab and turns it into real-time **translated** captions — rendered as a draggable overlay on the page, or in a floating **Picture-in-Picture** window that stays on top while you switch tabs. Bring your own [Gemini API key](https://aistudio.google.com/apikey), and any audio on the web becomes readable in your language.
+
+> Great for: foreign-language lectures and online courses, untranslated YouTube/Twitch streams, podcasts, and remote meetings.
+
+## How it compares
+
+| | **Gemini Live Caption** | Chrome Live Caption | Subtitle / page-translate extensions |
+|---|:---:|:---:|:---:|
+| Translates across 70+ languages | ✅ | ❌ (transcribe only) | ⚠️ text only, not audio |
+| Translation pipeline | **End-to-end · Gemini 3.5** | transcribe only | transcribe → translate (2-stage) |
+| Works on any tab audio (no platform subtitle track needed) | ✅ | ✅ | ❌ depends on platform captions |
+| Bilingual (original + translation) | ✅ | ❌ | ❌ |
+| Floating Picture-in-Picture window | ✅ | ❌ | ❌ |
+| Transcript history + SRT export | ✅ | ❌ | ⚠️ rarely |
+| Drag / resize / position presets | ✅ | ❌ | ⚠️ limited |
+| No backend — audio goes straight to Google | ✅ | ✅ | varies |
+
+**Why end-to-end matters:** most extensions chain a speech-to-text engine (Deepgram, Whisper) with a *separate* translation model — transcription errors compound and latency stacks. Gemini Live Caption rides Google's `gemini-3.5-live-translate` model **end-to-end**: one model listens and translates at once, auto-detects the source language, and covers 70+ languages with lower latency.
 
 ## Features
 
-- Real-time speech-to-text translation across 50+ languages
-- **Bilingual mode** — display original language alongside translation
-- Floating caption overlay — drag, resize, customize font size, color, and opacity
-- **Caption position presets** — 6 positions (top/bottom × left/center/right)
-- Picture-in-Picture window — keep captions visible when switching tabs
-- **Transcript history panel** — double-click to expand, scrollable history with timestamps
-- **SRT export** — download caption history as subtitle files
-- Automatic session management — handles Gemini's connection limits seamlessly
-- **Device change detection** — automatically rebuilds audio chain when switching output devices
-- **Connection status indicator** — visual feedback for connection state
-- **Debug logs** — export diagnostic logs without DevTools
-- Works on any website with audio: YouTube, Twitch, podcasts, video calls, etc.
+**Translation**
+- 🌐 Real-time speech translation across **70+ languages** (auto-detects the source language)
+- 🌍 **Bilingual mode** — show the original language alongside the translation
+
+**Display**
+- 🪟 Floating caption overlay — drag, resize, and customize font size, color, and opacity
+- 📺 **Picture-in-Picture** window — captions stay visible across tab switches
+- 📍 **6 position presets** (top/bottom × left/center/right)
+
+**Productivity**
+- 📜 **Transcript history panel** — double-click to expand, scrollable, timestamped
+- 💾 **SRT export** — download your caption history as a subtitle file
+
+**Reliability** _(the hard part — see [Tech highlights](#tech-highlights))_
+- 🔄 Automatic session rotation around Gemini's ~10-minute connection limit
+- 🔌 Exponential-backoff reconnect + caption watchdog for silent stalls
+- 🎧 Audio device hot-swap recovery (headphones / Bluetooth plug-unplug)
+- ♻️ Crash-safe state machine that survives service-worker restarts
+
+**Privacy**
+- 🔒 No intermediate servers — audio streams directly from your browser to Google
+- 🔑 Your API key is stored locally and never leaves your device (except to Google)
+- 🚫 Zero analytics, tracking, or telemetry
 
 ## Quick Start
 
 ### 1. Install
 
-**From source:**
+**From source (developer mode):**
 1. Download or clone this repository
 2. Open Chrome and go to `chrome://extensions`
-3. Enable **Developer mode** (toggle in top right)
+3. Enable **Developer mode** (top-right toggle)
 4. Click **Load unpacked** and select the project folder
-5. The extension icon will appear in your toolbar
+5. The extension icon appears in your toolbar
 
-### 2. Get a Gemini API Key
+### 2. Get a Gemini API key (free tier available)
 
 1. Go to [aistudio.google.com/apikey](https://aistudio.google.com/apikey)
-2. Sign in with your Google account
-3. Click **Create API key**
-4. Copy the key (it starts with `AIza...`)
+2. Sign in and click **Create API key**
+3. Copy the key (it starts with `AIza…`)
 
-### 3. Configure
+### 3. Caption anything
 
-1. Click the extension icon in your toolbar
-2. Paste your API key
-3. Select your target language (e.g., Chinese, Japanese, Korean, Spanish...)
-4. Adjust audio gain and noise gate if needed
+1. Open any page with audio (e.g. a YouTube video)
+2. Click the extension icon, paste your key, pick a target language
+3. Click **Start** (or press `Alt+C`)
+4. Captions appear as an overlay — click the PiP button to pop them out
 
-### 4. Use
-
-1. Open any page with audio (e.g., a YouTube video)
-2. Click the extension icon
-3. Click the **Start** button (or press `Alt+C`)
-4. Captions will appear as a floating overlay on the page
-5. Click the PiP button on the overlay to open captions in a Picture-in-Picture window
-
-## Settings
-
-| Setting | Description |
-|---------|-------------|
-| API Key | Your Gemini API key |
-| Target Language | Language to translate captions into |
-| Bilingual Mode | Show original language alongside translation |
-| Font Size | Caption text size (S/M/L) |
-| Background Opacity | Caption background darkness (default: 75%) |
-| Caption Position | Preset positions (top/bottom × left/center/right) |
-| Text Color | Caption text color (6 options) |
-| Audio Gain | Boost or reduce captured audio volume |
-| Noise Gate | Filter out background noise below this threshold |
-
-## How It Works
+## How it works
 
 ```
-Tab Audio → chrome.tabCapture → AudioWorklet (downsample to 16kHz)
+Tab audio
+  → chrome.tabCapture
+  → AudioWorklet (polyphase + Kaiser-window FIR downsample to 16 kHz)
   → WebSocket → Gemini Live Translate API
-  → Parse transcription responses
-  → Display floating caption overlay
-  → Optional: relay to Picture-in-Picture window
+  → parse transcription stream
+  → Shadow-DOM caption overlay
+  → (optional) relay to Picture-in-Picture window
 ```
 
-The extension captures audio from the current tab, streams it to Gemini's Live Translate API over WebSocket, and displays the translated text as a floating overlay. It automatically manages connection lifecycle — rotating sessions before they expire and reconnecting if the connection drops.
+The extension captures tab audio, streams it to Gemini's Live Translate API over WebSocket, and renders the translated text on screen. It manages the full connection lifecycle automatically — rotating sessions before they expire and reconnecting on drops — so captions stay continuous.
+
+## Tech highlights
+
+This is a deliberately well-engineered MV3 extension. If you're learning how to build production-grade Chrome extensions or how to drive the Gemini Live API, these parts are worth a read:
+
+- **Professional DSP resampling** (`audio-processor.js`): a Kaiser-window FIR low-pass with **polyphase decomposition** for integer ratios and linear interpolation for non-integer ratios — clean 16 kHz audio at any input sample rate.
+- **Seamless long sessions** (`offscreen.js`): proactive session rotation, `sessionResumption` handles, a caption watchdog for silent server stalls, and exponential-backoff reconnect — all to paper over Gemini Live's ~10-minute session ceiling.
+- **Crash-safe MV3 orchestration** (`service-worker.js`): a state machine with heartbeat + ping recovery so capture survives ephemeral service-worker restarts.
+- **Robust in-page UI** (`content.js`): a `closed` Shadow DOM for full style isolation, XSS-safe rendering, `AbortController`-managed listeners, and a `MutationObserver` that self-heals if the host page removes the overlay.
+
+## Roadmap
+
+- [ ] 🎙️ Microphone input (live in-person meetings & interpretation)
+- [ ] 🌐 Full UI internationalization (zh / en / ja / …)
+- [ ] 🧭 First-run onboarding wizard (guided API-key setup)
+- [ ] 🔌 Pluggable transcription providers (reduce single-vendor dependency)
+- [ ] 🧩 Microsoft Edge & Firefox builds
+- [ ] 🎨 Customizable caption themes
+
+Have an idea? [Open an issue](https://github.com/SodiumHydride/gemini-live-caption/issues).
+
+## Contributing
+
+Contributions are welcome — bug reports, feature ideas, and PRs all help.
+
+1. Fork the repo and create a feature branch
+2. Make your change (the codebase is plain JS, no build step required)
+3. Load the unpacked extension and test your change
+4. Open a pull request describing what and why
+
+If this project saves you time, a ⭐ on [GitHub](https://github.com/SodiumHydride/gemini-live-caption) genuinely helps it reach more people.
+
+## Star history
+
+<a href="https://star-history.com/#SodiumHydride/gemini-live-caption&Date">
+  <img src="https://api.star-history.com/svg?repos=SodiumHydride/gemini-live-caption&type=Date" alt="Star History Chart" width="600" />
+</a>
 
 ## Requirements
 
-- Chrome 116+ (for Document Picture-in-Picture API and offscreen document support)
-- Gemini API key (free tier available at [aistudio.google.com](https://aistudio.google.com))
+- Chrome 116+ (for Document Picture-in-Picture and offscreen-document support)
+- A Gemini API key — free tier available at [aistudio.google.com](https://aistudio.google.com)
 
-## Technical Notes
+## Privacy & disclaimer
 
-**`web_accessible_resources` with `<all_urls>`:** The manifest declares `pip.html`, `pip.css`, and `pip.js` as web-accessible to all origins. This is required because the Document Picture-in-Picture API creates a window from a URL that must be accessible from the content script's context on any page. Without `<all_urls>`, the PiP window fails to load on third-party sites (e.g., YouTube, Twitch). These files contain no sensitive logic — they only render caption text received via `postMessage`.
-
-## Known Limitations
-
-- Gemini Live sessions are limited to ~10 minutes per connection. The extension automatically rotates sessions to maintain continuous captions.
-- Audio-only capture — does not capture video or screen content.
-- Translation quality depends on audio clarity and Gemini's capabilities.
-- Requires an active internet connection.
-
-## Privacy
-
-- Audio is streamed directly from your browser to Google's Gemini API. No intermediate servers.
-- Your API key is stored locally in Chrome's extension storage and never shared.
-- No analytics, tracking, or data collection by this extension.
-- **Free API key notice:** If you use a free Gemini API key, Google may use your audio data for model training and human review. See [Google's Terms of Service](https://ai.google.dev/terms). For privacy-sensitive use, consider using a paid API key.
-- **Note:** Audio data is processed by Google's Gemini API. Google's [Terms of Service](https://ai.google.dev/terms) and [Privacy Policy](https://policies.google.com/privacy) apply. Do not use with sensitive or confidential audio.
-
-## Disclaimer
-
-This extension is a tool for real-time audio translation. The user is solely responsible for how they use it.
-
-- **Copyright:** Capturing audio from copyrighted content (streams, movies, music) may violate platform Terms of Service or applicable copyright laws. Ensure you have the right to capture and translate the audio you process through this extension.
-- **Privacy:** Do not use this extension to capture audio from private conversations without the consent of all parties involved. Laws regarding audio recording vary by jurisdiction.
-- **API usage:** This extension sends audio to Google's Gemini API. By using this extension, you agree to [Google's Terms of Service](https://ai.google.dev/terms). Free-tier API keys are subject to data usage policies that may include model training.
-- **Age restriction:** Users must be 18 or older. Google's Gemini API must not be used as part of a service directed at individuals under 18.
-- **No warranty:** This extension is provided "as is" without warranty of any kind. The developers are not responsible for any misuse, data loss, or legal consequences arising from the use of this extension.
+- Audio streams directly from your browser to Google's Gemini API — there is no intermediate server. See the full [Privacy Policy](PRIVACY.md).
+- **Free API keys:** Google may use your audio for model training and human review. For sensitive use, prefer a paid key. See [Google's Terms](https://ai.google.dev/terms).
+- **Use responsibly:** don't capture copyrighted content without permission or record private conversations without consent. You must be 18+ to use Google's Gemini API.
+- Provided "as is", without warranty of any kind.
 
 ## License
 
-CC BY-NC 4.0 — Free for non-commercial use. See [LICENSE](LICENSE) for details.
+[CC BY-NC 4.0](LICENSE) — free for non-commercial use.
+
+<sub>Built by <a href="https://github.com/SodiumHydride">NaH</a> · Powered by Google Gemini</sub>
