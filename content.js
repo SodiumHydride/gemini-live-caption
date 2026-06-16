@@ -41,10 +41,13 @@
       host.style.setProperty('--cap-font-size', FONT_MAP[s.fontSize] ?? FONT_MAP.medium);
     }
     if (s.bgOpacity !== undefined) host.style.setProperty('--cap-bg', `rgba(0,0,0,${s.bgOpacity})`);
-    if (s.maxLines) {
-      MAX_LINES = s.maxLines;
+    if (s.overlayMaxLines) {
+      MAX_LINES = s.overlayMaxLines;
     }
-    if (s.fontSize || s.maxLines) applyViewportSize();
+    if (s.textColor) {
+      host.style.setProperty('--cap-text', s.textColor);
+    }
+    if (s.fontSize || s.overlayMaxLines) applyViewportSize();
   }
 
   function init() {
@@ -79,10 +82,10 @@
     document.documentElement.appendChild(host);
     shadow = host.attachShadow({ mode: 'closed' });
     const gen = ++initGeneration;
-    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity', 'maxLines'], r => {
+    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity', 'overlayMaxLines', 'textColor'], r => {
       if (gen !== initGeneration) return;  // Stale callback, ignore
       if (r[STORE_KEY]) Object.assign(layout, r[STORE_KEY]);
-      if (r.maxLines) MAX_LINES = r.maxLines;
+      if (r.overlayMaxLines) MAX_LINES = r.overlayMaxLines;
       build();
       applySettings(r);
       // Wire i18n: register this Shadow DOM so it gets re-translated on UI
@@ -527,7 +530,7 @@
   // lines — no translateY, no per-update animation, no extra DOM layers.
 
   const COMMITTED_MAX_CHARS = 600;
-  let committedText = '';
+  let committedSegments = [];
   let liveText = '';
   let lastFinalized = '';
 
@@ -557,22 +560,27 @@
 
   function renderCaption() {
     if (!flowEl) return;
+    const committedText = committedSegments.reduce((acc, seg) => joinSegments(acc, seg.text), '');
     const display = joinSegments(committedText, liveText);
     if (flowEl.textContent !== display) flowEl.textContent = display;
   }
 
-  function appendCommitted(segment) {
-    const s = segment.trim();
+  function appendCommitted(text, segment) {
+    const s = text.trim();
     if (!s) return;
-    committedText = joinSegments(committedText, s);
-    if (committedText.length > COMMITTED_MAX_CHARS) {
-      committedText = committedText.slice(-COMMITTED_MAX_CHARS);
+    const id = segment?.id || segment?.segmentId;
+    if (!id) {
+      dbg('Final caption ignored: missing segment id');
+      return;
+    }
+    if (committedSegments.some(item => item.id === id)) return;
+    committedSegments.push({ id, text: s });
+    while (committedSegments.length > 1 && committedSegments.reduce((n, item) => n + item.text.length, 0) > COMMITTED_MAX_CHARS) {
+      committedSegments.shift();
     }
   }
 
-  function show(text, isFinal, originalText) {
-    if (pipActive) return;
-
+  function show(text, isFinal, originalText, segment) {
     if (!text) {
       if (!isFinal) {
         liveText = '';
@@ -582,9 +590,14 @@
     }
 
     if (isFinal) {
-      if (text.trim() === lastFinalized.trim()) return;
-      lastFinalized = text;
-      appendCommitted(text);
+      const finalKey = segment?.id;
+      if (!finalKey) {
+        dbg('Final caption ignored: missing segment metadata');
+        return;
+      }
+      if (finalKey === lastFinalized) return;
+      lastFinalized = finalKey;
+      appendCommitted(text, segment);
       liveText = '';
     } else {
       liveText = text.trim();
@@ -592,7 +605,7 @@
     renderCaption();
 
     capturing = true;
-    wrap.classList.add('vis');
+    if (!pipActive) wrap.classList.add('vis');
     placeholder.classList.remove('show');
     linesEl.style.display = '';
     linesEl.style.opacity = '1';
@@ -613,7 +626,7 @@
   }
 
   function clearTrackState() {
-    committedText = '';
+    committedSegments = [];
     liveText = '';
     lastFinalized = '';
     if (flowEl) flowEl.textContent = '';
@@ -622,6 +635,17 @@
       linesEl.style.display = 'none';
     }
     placeholder.classList.add('show');
+  }
+
+  function applySegmentUpdate(segment) {
+    if (!segment?.id || !segment.text) return;
+    const item = committedSegments.find(s => s.id === segment.id);
+    if (item) {
+      item.text = segment.text;
+      renderCaption();
+    }
+    updateCachedSegment(segment);
+    postToPiP({ type: 'TRANSCRIPT_SEGMENT_UPDATED', segment });
   }
 
   // ==================== HISTORY PANEL ====================
@@ -637,17 +661,25 @@
     if (!historyPanel || !historyScroll) return;
     historyVisible = true;
 
-    // Populate history
-    renderHistory();
+    // Populate from the runtime transcript store; local cache remains a live view cache.
+    refreshTranscriptFromStore()
+      .then(() => {
+        renderHistory();
+        requestAnimationFrame(() => {
+          historyScroll.scrollTop = historyScroll.scrollHeight;
+        });
+      })
+      .catch(err => {
+        dbg('Transcript refresh failed:', err.message);
+        renderHistory();
+        requestAnimationFrame(() => {
+          historyScroll.scrollTop = historyScroll.scrollHeight;
+        });
+      });
 
     // Show panel with animation
     historyPanel.classList.add('visible');
     historyOverlay.classList.add('visible');
-
-    // Scroll to bottom
-    requestAnimationFrame(() => {
-      historyScroll.scrollTop = historyScroll.scrollHeight;
-    });
 
     // Pause fade timer while viewing history
     clearTimeout(fadeTimer);
@@ -681,13 +713,14 @@
     // Render all history entries
     const entries = getCaptionHistory();
     for (const entry of entries) {
+      if (!isRenderableSegment(entry)) continue;
       const el = document.createElement('div');
       el.className = 'history-entry';
 
       // Timestamp
       const time = document.createElement('span');
       time.className = 'history-time';
-      const d = new Date(entry.ts);
+      const d = new Date(entry.startTs);
       time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 
       // Content (original + translated)
@@ -709,48 +742,6 @@
       el.appendChild(time);
       el.appendChild(contentEl);
       historyScroll.appendChild(el);
-    }
-  }
-
-  function appendToHistory(text, ts, originalText) {
-    if (!historyScroll || !historyVisible) return;
-
-    const el = document.createElement('div');
-    el.className = 'history-entry';
-
-    const time = document.createElement('span');
-    time.className = 'history-time';
-    const d = new Date(ts);
-    time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-
-    const contentEl = document.createElement('div');
-    contentEl.className = 'history-content';
-
-    if (originalText) {
-      const origEl = document.createElement('div');
-      origEl.className = 'history-original';
-      origEl.textContent = originalText;
-      contentEl.appendChild(origEl);
-    }
-
-    const textEl = document.createElement('div');
-    textEl.className = 'history-text';
-    textEl.textContent = text;
-    contentEl.appendChild(textEl);
-
-    el.appendChild(time);
-    el.appendChild(contentEl);
-    historyScroll.appendChild(el);
-
-    // Near-Bottom Detection: only auto-scroll if user is already at bottom
-    const threshold = 80;
-    const { scrollHeight, scrollTop, clientHeight } = historyScroll;
-    const isNearBottom = scrollHeight - scrollTop - clientHeight < threshold;
-
-    if (isNearBottom) {
-      requestAnimationFrame(() => {
-        historyScroll.scrollTop = historyScroll.scrollHeight;
-      });
     }
   }
 
@@ -987,12 +978,15 @@
       return;
     }
 
+    let onPiPMessage = null;
     try {
-      // Fixed 2-line PiP window + toolbar (use px since PiP uses px font sizes)
+      const pipSettings = await chrome.storage.local.get(['fontSize', 'pipMaxLines']);
+      const pipFontMap = { small: 20, medium: 28, large: 36, xlarge: 44 };
       const pipWidth = Math.max(layout.w || 560, 400);
-      const pipFontSize = 28; // PiP medium font size in px
+      const pipFontSize = pipFontMap[pipSettings.fontSize] || pipFontMap.medium;
+      const pipLines = [2, 3, 4, 5].includes(pipSettings.pipMaxLines) ? pipSettings.pipMaxLines : 2;
       const pipLineH = pipFontSize * 1.4 + 12; // line-height + padding
-      const pipHeight = Math.round(pipLineH * 2 + 50); // 2 lines + toolbar
+      const pipHeight = Math.round(pipLineH * pipLines + 50);
       pipWindow = await window.documentPictureInPicture.requestWindow({
         width: pipWidth,
         height: pipHeight,
@@ -1001,6 +995,30 @@
       // Hide overlay while PiP is open (avoid double display)
       pipActive = true;
       wrap.classList.remove('vis');
+
+      // Listen for messages FROM PiP window (sent via window.opener.postMessage).
+      // Must listen on `window` (the host page), not on `pipWindow`.
+      // Verify message source to prevent malicious page injection.
+      onPiPMessage = async function (event) {
+        if (event.source !== pipWindow) return;
+        if (!event.data || !event.data.type) return;
+        if (event.data.type === 'PIP_READY') {
+          await syncSettingsToPiP();
+          await replayTranscriptToPiP();
+        } else if (event.data.type === 'PIP_CLOSED') {
+          chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});
+          btn.classList.remove('active');
+          pipWindow = null;
+          window.removeEventListener('message', onPiPMessage);
+        } else if (event.data.type === 'PIP_SETTINGS_CHANGED') {
+          // PiP window changed a setting — persist it
+          const { key, value } = event.data;
+          if (['fontSize', 'bgOpacity', 'textColor', 'pipMaxLines'].includes(key) && value !== undefined) {
+            chrome.storage.local.set({ [key]: value }).catch(() => {});
+          }
+        }
+      };
+      window.addEventListener('message', onPiPMessage);
 
       // Fetch pip.html and replace relative URLs with absolute extension URLs.
       // PiP window inherits host page origin, so relative paths break.
@@ -1020,27 +1038,6 @@
       chrome.runtime.sendMessage({ type: 'PIP_OPENED' }).catch(() => {});
       btn.classList.add('active');
 
-      // Listen for messages FROM PiP window (sent via window.opener.postMessage).
-      // Must listen on `window` (the host page), not on `pipWindow`.
-      // Verify message source to prevent malicious page injection.
-      function onPiPMessage(event) {
-        if (event.source !== pipWindow) return;
-        if (!event.data || !event.data.type) return;
-        if (event.data.type === 'PIP_CLOSED') {
-          chrome.runtime.sendMessage({ type: 'PIP_CLOSED' }).catch(() => {});
-          btn.classList.remove('active');
-          pipWindow = null;
-          window.removeEventListener('message', onPiPMessage);
-        } else if (event.data.type === 'PIP_SETTINGS_CHANGED') {
-          // PiP window changed a setting — persist it
-          const { key, value } = event.data;
-          if (key && value !== undefined) {
-            chrome.storage.local.set({ [key]: value }).catch(() => {});
-          }
-        }
-      }
-      window.addEventListener('message', onPiPMessage);
-
       // PiP window closed by user (browser chrome close button, etc.)
       // Capture reference to avoid closure race if pipWindow is reassigned.
       const thisPipWin = pipWindow;
@@ -1054,74 +1051,95 @@
         if (capturing) wrap.classList.add('vis');
       });
 
-      // Replay recent captions into PiP window so it's not empty on open
-      replayBufferToPiP();
-
-      // Sync settings to PiP (but NOT maxLines — PiP has its own independent setting)
-      chrome.storage.local.get(['fontSize', 'bgOpacity', 'textColor', 'bilingualMode'], (r) => {
-        const s = {};
-        if (r.fontSize) s.fontSize = r.fontSize;
-        if (r.bgOpacity !== undefined) s.bgOpacity = r.bgOpacity;
-        if (r.textColor) s.textColor = r.textColor;
-        if (r.bilingualMode !== undefined) s.bilingualMode = r.bilingualMode;
-        // Bring PiP in sync with the user's UI language (PiP has no chrome.* access).
-        if (window.I18N) s.uiLanguage = I18N.getLang();
-        if (Object.keys(s).length) postToPiP({ type: 'SETTINGS_UPDATE', ...s });
-      });
     } catch (err) {
       dbg('PiP failed:', err);
+      if (onPiPMessage) window.removeEventListener('message', onPiPMessage);
       pipWindow = null;
+      pipActive = false;
+      btn.classList.remove('active');
     }
   }
 
-  // Caption ring buffer for PiP catch-up and history export
-  const CAPTION_HISTORY_SIZE = 500;  // Keep last 500 finalized captions
+  // Caption cache for rendering; service-worker transcript store is authoritative.
+  const CAPTION_HISTORY_SIZE = 500;
   const captionHistory = [];
-  let sessionStartTime = null;
 
   // PiP buffer is a subset of history (most recent)
   const PIP_BUFFER_SIZE = 20;
 
-  function bufferCaption(text, isFinal, originalText) {
-    if (!isFinal) return; // Only buffer finalized captions
-    if (!sessionStartTime) sessionStartTime = Date.now();
-    const ts = Date.now();
-    captionHistory.push({ text, ts, original: originalText || '' });
+  function bufferCaption(msg) {
+    if (!msg.isFinal) return;
+    const segment = msg.segment || normalizeMessageSegment(msg);
+    if (!segment) {
+      dbg('Final caption not cached: missing segment metadata');
+      return;
+    }
+    updateCachedSegment(segment);
+  }
+
+  function normalizeMessageSegment(msg) {
+    if (!msg.segmentId || !Number.isFinite(msg.startedAt) || !Number.isFinite(msg.endedAt) || msg.endedAt <= msg.startedAt) {
+      return null;
+    }
+    return {
+      id: msg.segmentId,
+      text: msg.text,
+      rawText: msg.text,
+      original: msg.original || '',
+      startTs: msg.startedAt,
+      endTs: msg.endedAt,
+      sourceLanguage: msg.sourceLanguage || '',
+      targetLanguage: msg.targetLanguage || '',
+      revisionStatus: 'raw',
+    };
+  }
+
+  function isRenderableSegment(entry) {
+    return !!entry?.id && !!entry.text && Number.isFinite(entry.startTs) && Number.isFinite(entry.endTs) && entry.endTs > entry.startTs;
+  }
+
+  function updateCachedSegment(segment) {
+    if (!isRenderableSegment(segment)) return;
+    const idx = captionHistory.findIndex(entry => entry.id === segment.id);
+    if (idx >= 0) captionHistory[idx] = { ...captionHistory[idx], ...segment };
+    else captionHistory.push(segment);
     if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
 
     // If history panel is visible, append new entry
-    if (historyVisible) {
-      appendToHistory(text, ts, originalText);
-    }
+    if (historyVisible) renderHistory();
   }
 
   function getCaptionHistory() {
     return captionHistory.slice();
   }
 
-  function formatSRT(entries) {
-    if (!entries.length) return '';
-    const startTime = entries[0].ts;
-    return entries.map((entry, i) => {
-      const start = entry.ts - startTime;
-      const end = (i < entries.length - 1 ? entries[i + 1].ts : entry.ts + 2000) - startTime;
-      const formatTime = (ms) => {
-        const h = Math.floor(ms / 3600000);
-        const m = Math.floor((ms % 3600000) / 60000);
-        const s = Math.floor((ms % 60000) / 1000);
-        const ms2 = ms % 1000;
-        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms2).padStart(3, '0')}`;
-      };
-      return `${i + 1}\n${formatTime(start)} --> ${formatTime(end)}\n${entry.text}\n`;
-    }).join('\n');
+  async function refreshTranscriptFromStore() {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_TRANSCRIPT' });
+    if (response?.segments) {
+      captionHistory.splice(0, captionHistory.length, ...response.segments.slice(-CAPTION_HISTORY_SIZE));
+    }
+    return captionHistory;
   }
 
-  function replayBufferToPiP() {
+  async function replayTranscriptToPiP() {
     if (!pipWindow || pipWindow.closed) return;
-    const recent = captionHistory.slice(-PIP_BUFFER_SIZE);
+    await refreshTranscriptFromStore();
+    const recent = captionHistory.filter(isRenderableSegment).slice(-PIP_BUFFER_SIZE);
     for (const entry of recent) {
-      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true, original: entry.original });
+      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true, original: entry.original, segment: entry });
     }
+  }
+
+  async function syncSettingsToPiP() {
+    const r = await chrome.storage.local.get(['fontSize', 'bgOpacity', 'textColor', 'bilingualMode', 'pipMaxLines']);
+    const s = {};
+    if (r.fontSize) s.fontSize = r.fontSize;
+    if (r.bgOpacity !== undefined) s.bgOpacity = r.bgOpacity;
+    if (r.textColor) s.textColor = r.textColor;
+    if (r.bilingualMode !== undefined) s.bilingualMode = r.bilingualMode;
+    if (r.pipMaxLines) s.pipMaxLines = r.pipMaxLines;
+    if (window.I18N) s.uiLanguage = I18N.getLang();
+    if (Object.keys(s).length) postToPiP({ type: 'SETTINGS_UPDATE', ...s });
   }
 
   function postToPiP(msg) {
@@ -1155,7 +1173,7 @@
             if (oldHost) oldHost.remove();
             suppressObserver = false;
             shadow = wrap = linesEl = flowEl = placeholder = statusIndicator = null;
-            committedText = '';
+            committedSegments = [];
             liveText = '';
             lastFinalized = '';
             init();
@@ -1163,12 +1181,15 @@
             dbg('Reinit failed:', reinitErr);
           }
         }
-        show(msg.text, msg.isFinal, msg.original);
+        const segment = msg.segment || normalizeMessageSegment(msg);
+        show(msg.text, msg.isFinal, msg.original, segment);
         // Show PiP button when captions are flowing
         if (pipBtn) pipBtn.classList.add('vis');
         // Relay to PiP window and buffer for catch-up
-        bufferCaption(msg.text, msg.isFinal, msg.original);
-        postToPiP({ type: 'CAPTION_UPDATE', text: msg.text, isFinal: msg.isFinal, original: msg.original });
+        bufferCaption(msg);
+        postToPiP({ type: 'CAPTION_UPDATE', text: msg.text, isFinal: msg.isFinal, original: msg.original, segment });
+      } else if (msg.type === 'TRANSCRIPT_SEGMENT_UPDATED') {
+        applySegmentUpdate(msg.segment);
       } else if (msg.type === 'CLEAR_CAPTIONS') {
         clearCaptions();
         postToPiP({ type: 'CLEAR_CAPTIONS' });
@@ -1183,10 +1204,6 @@
         if (shadow && shadow.host) {
           shadow.host.style.setProperty('--cap-text', msg.color);
         }
-      } else if (msg.type === 'EXPORT_CAPTIONS') {
-        const history = getCaptionHistory();
-        const srt = formatSRT(history);
-        return { captions: history, srt };
       }
     } catch (e) {
       if (e.message && e.message.includes('Extension context invalidated')) {
@@ -1219,9 +1236,9 @@
     if (changes.bgOpacity) s.bgOpacity = changes.bgOpacity.newValue;
     if (changes.textColor) s.textColor = changes.textColor.newValue;
     if (changes.bilingualMode) s.bilingualMode = changes.bilingualMode.newValue;
-    if (changes.maxLines) {
-      // Overlay maxLines — don't relay to PiP (PiP has its own independent setting)
-      applySettings({ maxLines: changes.maxLines.newValue });
+    if (changes.pipMaxLines) s.pipMaxLines = changes.pipMaxLines.newValue;
+    if (changes.overlayMaxLines) {
+      applySettings({ overlayMaxLines: changes.overlayMaxLines.newValue });
     }
     if (Object.keys(s).length) {
       applySettings(s);

@@ -15,7 +15,7 @@
 
 English | [中文](README_zh.md)
 
-[Install](#quick-start) · [Features](#features) · [How it works](#how-it-works) · [Tech highlights](#tech-highlights) · [Roadmap](#roadmap) · [Contributing](#contributing)
+[Install](#quick-start) · [Features](#features) · [How it works](#how-it-works) · [Permissions](#permissions) · [Roadmap](#roadmap) · [Contributing](#contributing)
 
 <br/>
 
@@ -54,15 +54,16 @@ Chrome's built-in Live Caption only **transcribes English** — it doesn't trans
 **Translation**
 - 🌐 Real-time speech translation across **70+ languages** (auto-detects the source language)
 - 🌍 **Bilingual mode** — show the original language alongside the translation
+- ✨ Optional finalized-caption polish with a terminology/style guide
 
 **Display**
 - 🪟 Floating caption overlay — drag, resize, and customize font size, color, and opacity
-- 📺 **Picture-in-Picture** window — captions stay visible across tab switches
+- 📺 **Picture-in-Picture** window — captions stay visible across tab switches, with its own line-count control
 - 📍 **6 position presets** (top/bottom × left/center/right)
 
 **Productivity**
 - 📜 **Transcript history panel** — double-click to expand, scrollable, timestamped
-- 💾 **SRT export** — download your caption history as a subtitle file
+- 💾 **SRT export** — generated from the service worker's finalized transcript store
 
 **Reliability** _(the hard part — see [Tech highlights](#tech-highlights))_
 - 🔄 Automatic session rotation around Gemini's ~10-minute connection limit
@@ -73,6 +74,7 @@ Chrome's built-in Live Caption only **transcribes English** — it doesn't trans
 **Privacy**
 - 🔒 No intermediate servers — audio streams directly from your browser to Google
 - 🔑 Your API key is stored locally and never leaves your device (except to Google)
+- 📜 Finalized captions are kept in Chrome session storage for history and SRT export
 - 🚫 Zero analytics, tracking, or telemetry
 
 ## Quick Start
@@ -120,6 +122,7 @@ This is a deliberately well-engineered MV3 extension. If you're learning how to 
 - **Professional DSP resampling** (`audio-processor.js`): a Kaiser-window FIR low-pass with **polyphase decomposition** for integer ratios and linear interpolation for non-integer ratios — clean 16 kHz audio at any input sample rate.
 - **Seamless long sessions** (`offscreen.js`): proactive session rotation, `sessionResumption` handles, a caption watchdog for silent server stalls, and exponential-backoff reconnect — all to paper over Gemini Live's ~10-minute session ceiling.
 - **Crash-safe MV3 orchestration** (`service-worker.js`): a state machine with heartbeat + ping recovery so capture survives ephemeral service-worker restarts.
+- **Authoritative transcript store** (`service-worker.js`): finalized segments, SRT timing, and optional post-final polish live in one service-worker-owned session store instead of being reconstructed by the page overlay.
 - **Robust in-page UI** (`content.js`): a `closed` Shadow DOM for full style isolation, XSS-safe rendering, `AbortController`-managed listeners, and a `MutationObserver` that self-heals if the host page removes the overlay.
 
 ## Roadmap
@@ -155,9 +158,23 @@ If this project saves you time, a ⭐ on [GitHub](https://github.com/SodiumHydri
 - Chrome 116+ (for Document Picture-in-Picture and offscreen-document support)
 - A Gemini API key — free tier available at [aistudio.google.com](https://aistudio.google.com)
 
+## Permissions
+
+Gemini Live Caption asks only for the Chrome permissions needed to capture the active tab's audio, render captions, and keep the MV3 extension reliable:
+
+- `tabCapture`: capture audio from the tab you choose after you start captions.
+- `offscreen`: run audio capture, AudioWorklet processing, and the Gemini Live WebSocket from an offscreen extension document.
+- `storage`: store your local settings/API key and keep session transcript segments for history and SRT export.
+- `activeTab`: identify the current tab after your click or keyboard shortcut.
+- `scripting`: inject the isolated caption overlay into the source tab.
+- `tabs`: track tab navigation/close/replace events so capture can stop or recover cleanly.
+
+The extension does not request host permissions. Its Picture-in-Picture files are listed as web-accessible resources because Document Picture-in-Picture is opened from arbitrary pages; those files are static UI assets and contain no API keys or user data.
+
 ## Privacy & disclaimer
 
-- Audio streams directly from your browser to Google's Gemini API — there is no intermediate server. See the full [Privacy Policy](PRIVACY.md).
+- Audio streams directly from your browser to Google's Gemini API — there is no intermediate server. Finalized captions are kept in Chrome session storage for transcript history and SRT export. See the full [Privacy Policy](PRIVACY.md).
+- Optional finalized-caption polish sends the finalized text segment, source transcript when available, and terminology/style rules to Google's Generative Language API. It is off by default.
 - **Free API keys:** Google may use your audio for model training and human review. For sensitive use, prefer a paid key. See [Google's Terms](https://ai.google.dev/terms).
 - **Use responsibly:** don't capture copyrighted content without permission or record private conversations without consent. You must be 18+ to use Google's Gemini API.
 - Provided "as is", without warranty of any kind.

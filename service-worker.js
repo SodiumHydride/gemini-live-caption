@@ -10,6 +10,13 @@
 const DEBUG = false;
 const dbg = (...args) => DEBUG && console.log(...args);
 
+const TRANSCRIPT_SEGMENTS_KEY = 'transcriptSegments';
+const TRANSCRIPT_SESSION_KEY = 'transcriptSession';
+const TRANSCRIPT_LIMIT = 1000;
+const REVISION_MODES = new Set(['off', 'polish']);
+const REVISION_MODEL = 'gemini-3.5-flash';
+let revisionQueue = Promise.resolve();
+
 // ==================== STATE MANAGEMENT ====================
 // State structure in chrome.storage.session:
 // {
@@ -252,10 +259,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           type: 'CAPTION_UPDATE',
           text: msg.text,
           isFinal: msg.isFinal,
+          segmentId: msg.segmentId,
+          startedAt: msg.startedAt,
+          endedAt: msg.endedAt,
+          sourceLanguage: msg.sourceLanguage,
+          targetLanguage: msg.targetLanguage,
         };
         // Pass through original text for bilingual mode
         if (msg.original) {
           captionMsg.original = msg.original;
+        }
+        if (msg.isFinal && msg.text) {
+          try {
+            const segment = await storeFinalTranscriptSegment(captionMsg);
+            captionMsg.segment = segment;
+            enqueueCaptionRevision(segment);
+          } catch (err) {
+            console.error('[SW] Transcript store rejected finalized caption:', err.message);
+          }
         }
         try {
           await chrome.tabs.sendMessage(activeTabId, captionMsg);
@@ -316,7 +337,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         allowed.noiseGate = msg.settings.noiseGate;
       }
       if (typeof msg.settings?.bilingualMode === 'boolean') allowed.bilingualMode = msg.settings.bilingualMode;
-      if ([2, 3, 4].includes(msg.settings?.maxLines)) allowed.maxLines = msg.settings.maxLines;
+      if (typeof msg.settings?.echoTargetLanguage === 'boolean') allowed.echoTargetLanguage = msg.settings.echoTargetLanguage;
+      if ([2, 3, 4].includes(msg.settings?.overlayMaxLines)) allowed.overlayMaxLines = msg.settings.overlayMaxLines;
+      if ([2, 3, 4, 5].includes(msg.settings?.pipMaxLines)) allowed.pipMaxLines = msg.settings.pipMaxLines;
+      if (REVISION_MODES.has(msg.settings?.captionRevisionMode)) allowed.captionRevisionMode = msg.settings.captionRevisionMode;
+      if (typeof msg.settings?.captionTerminology === 'string') allowed.captionTerminology = msg.settings.captionTerminology.slice(0, 4000);
       if (Object.keys(allowed).length === 0) {
         sendResponse({ success: false, error: 'No valid settings' });
         return;
@@ -431,17 +456,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'EXPORT_CAPTIONS') {
     if (!isFromPopup(sender)) return false;
     (async () => {
-      const { activeTabId } = await chrome.storage.session.get('activeTabId');
-      if (activeTabId) {
-        try {
-          const response = await chrome.tabs.sendMessage(activeTabId, { type: 'EXPORT_CAPTIONS' });
-          sendResponse(response || { captions: [], srt: '' });
-        } catch (e) {
-          sendResponse({ captions: [], srt: '' });
-        }
-      } else {
-        sendResponse({ captions: [], srt: '' });
-      }
+      const segments = await getTranscriptSegments();
+      sendResponse({ captions: segments, segments, srt: formatSRT(segments) });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'GET_TRANSCRIPT') {
+    (async () => {
+      const segments = await getTranscriptSegments();
+      sendResponse({ segments, srt: formatSRT(segments) });
     })();
     return true;
   }
@@ -450,15 +474,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Handle extension install/update
 chrome.runtime.onInstalled.addListener(async (details) => {
   dbg(`[SW] Extension ${details.reason}`);
-  const existing = await chrome.storage.local.get(['targetLanguage', 'apiKey']);
-  if (!existing.targetLanguage) {
-    await chrome.storage.local.set({
-      apiKey: '',
-      targetLanguage: 'zh-Hans',
-      fontSize: 'medium',
-      bgOpacity: 0.75,
-    });
-  }
+  const existing = await chrome.storage.local.get([
+    'targetLanguage', 'apiKey', 'fontSize', 'bgOpacity', 'maxLines',
+    'overlayMaxLines', 'pipMaxLines', 'echoTargetLanguage', 'captionRevisionMode',
+    'captionTerminology',
+  ]);
+  const defaults = {};
+  if (existing.apiKey === undefined) defaults.apiKey = '';
+  if (!existing.targetLanguage) defaults.targetLanguage = 'zh-Hans';
+  if (!existing.fontSize) defaults.fontSize = 'medium';
+  if (existing.bgOpacity === undefined) defaults.bgOpacity = 0.75;
+  if (existing.overlayMaxLines === undefined) defaults.overlayMaxLines = existing.maxLines ?? 2;
+  if (existing.pipMaxLines === undefined) defaults.pipMaxLines = 2;
+  if (existing.echoTargetLanguage === undefined) defaults.echoTargetLanguage = false;
+  if (!REVISION_MODES.has(existing.captionRevisionMode)) defaults.captionRevisionMode = 'off';
+  if (existing.captionTerminology === undefined) defaults.captionTerminology = '';
+  if (Object.keys(defaults).length) await chrome.storage.local.set(defaults);
   await chrome.storage.session.set({ captureState: 'idle', activeTabId: null, waitingReloadTabId: null });
   await chrome.action.setBadgeText({ text: '' });
 });
@@ -543,7 +574,8 @@ async function startCapture(tabId) {
   try {
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
     const settings = await chrome.storage.local.get([
-      'apiKey', 'targetLanguage', 'audioGain', 'noiseGate', 'bilingualMode'
+      'apiKey', 'targetLanguage', 'audioGain', 'noiseGate', 'bilingualMode',
+      'echoTargetLanguage', 'captionTerminology'
     ]);
     await ensureOffscreenDocument();
 
@@ -556,6 +588,8 @@ async function startCapture(tabId) {
         audioGain: settings.audioGain ?? 1.0,
         noiseGate: settings.noiseGate ?? 0,
         bilingualMode: settings.bilingualMode ?? false,
+        echoTargetLanguage: settings.echoTargetLanguage ?? false,
+        captionTerminology: settings.captionTerminology || '',
       },
     });
 
@@ -563,6 +597,7 @@ async function startCapture(tabId) {
       throw new Error(response?.error || 'Failed to start capture');
     }
 
+    await resetTranscriptSession(tabId, settings);
     await chrome.storage.session.set({ captureState: 'capturing' });
     await chrome.action.setBadgeText({ text: 'ON' });
     await chrome.action.setBadgeBackgroundColor({ color: '#00C853' });
@@ -670,6 +705,176 @@ async function ensureContentScript(tabId) {
   } catch (e) {
     console.warn('[SW] Content script injection:', e.message);
   }
+}
+
+// ==================== TRANSCRIPT STORE ====================
+
+async function resetTranscriptSession(tabId, settings) {
+  await chrome.storage.session.set({
+    [TRANSCRIPT_SEGMENTS_KEY]: [],
+    [TRANSCRIPT_SESSION_KEY]: {
+      id: `cap-${Date.now()}`,
+      tabId,
+      startedAt: Date.now(),
+      targetLanguage: settings.targetLanguage || 'zh-Hans',
+    },
+  });
+}
+
+async function getTranscriptSegments() {
+  const data = await chrome.storage.session.get(TRANSCRIPT_SEGMENTS_KEY);
+  return Array.isArray(data[TRANSCRIPT_SEGMENTS_KEY]) ? data[TRANSCRIPT_SEGMENTS_KEY] : [];
+}
+
+async function storeFinalTranscriptSegment(msg) {
+  const segment = normalizeFinalTranscriptSegment(msg);
+  const segments = await getTranscriptSegments();
+  segments.push(segment);
+  if (segments.length > TRANSCRIPT_LIMIT) segments.splice(0, segments.length - TRANSCRIPT_LIMIT);
+  await chrome.storage.session.set({ [TRANSCRIPT_SEGMENTS_KEY]: segments });
+  return segment;
+}
+
+function normalizeFinalTranscriptSegment(msg) {
+  const text = (msg.text || '').trim();
+  if (!text) throw new Error('empty finalized caption');
+  if (!msg.segmentId) throw new Error('missing segment id');
+  if (!Number.isFinite(msg.startedAt) || !Number.isFinite(msg.endedAt) || msg.endedAt <= msg.startedAt) {
+    throw new Error(`invalid caption timestamps for ${msg.segmentId}`);
+  }
+  return {
+    id: msg.segmentId,
+    startTs: msg.startedAt,
+    endTs: msg.endedAt,
+    text,
+    rawText: text,
+    original: msg.original || '',
+    sourceLanguage: msg.sourceLanguage || '',
+    targetLanguage: msg.targetLanguage || '',
+    revisionStatus: 'raw',
+    revisionModel: '',
+    revisionError: '',
+  };
+}
+
+function formatSRT(segments) {
+  const valid = segments.filter(s => s && s.text && Number.isFinite(s.startTs) && Number.isFinite(s.endTs) && s.endTs > s.startTs);
+  if (!valid.length) return '';
+  const startTime = valid[0].startTs;
+  return valid.map((entry, i) => {
+    const start = entry.startTs - startTime;
+    const end = entry.endTs - startTime;
+    const body = entry.original ? `${entry.original}\n${entry.text}` : entry.text;
+    return `${i + 1}\n${formatSRTTime(start)} --> ${formatSRTTime(end)}\n${body}\n`;
+  }).join('\n');
+}
+
+function formatSRTTime(ms) {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const ms2 = ms % 1000;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(ms2).padStart(3, '0')}`;
+}
+
+function enqueueCaptionRevision(segment) {
+  revisionQueue = revisionQueue.then(() => maybeReviseSegment(segment)).catch(err => {
+    console.error('[SW] Caption revision queue failed:', err.message);
+  });
+}
+
+async function maybeReviseSegment(segment) {
+  const settings = await chrome.storage.local.get(['captionRevisionMode', 'captionTerminology', 'apiKey', 'targetLanguage']);
+  if ((settings.captionRevisionMode || 'off') !== 'polish') return;
+  let revisedText;
+  try {
+    revisedText = await requestCaptionRevision(segment, settings);
+  } catch (err) {
+    await updateTranscriptSegment(segment.id, {
+      revisionStatus: 'error',
+      revisionModel: REVISION_MODEL,
+      revisionError: err.message.slice(0, 240),
+    });
+    throw err;
+  }
+  if (!revisedText || revisedText === segment.text) {
+    await updateTranscriptSegment(segment.id, { revisionStatus: 'unchanged', revisionModel: REVISION_MODEL });
+    return;
+  }
+  const updated = await updateTranscriptSegment(segment.id, {
+    text: revisedText,
+    revisionStatus: 'revised',
+    revisionModel: REVISION_MODEL,
+    revisionError: '',
+  });
+  await notifyTranscriptSegmentUpdated(updated);
+}
+
+async function requestCaptionRevision(segment, settings) {
+  if (!settings.apiKey) throw new Error('caption revision requires an API key');
+  const prompt = buildRevisionPrompt(segment, settings);
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${REVISION_MODEL}:generateContent?key=${encodeURIComponent(settings.apiKey)}`;
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: 'application/json',
+      },
+    }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    await updateTranscriptSegment(segment.id, {
+      revisionStatus: 'error',
+      revisionModel: REVISION_MODEL,
+      revisionError: `HTTP ${res.status}: ${body.slice(0, 240)}`,
+    });
+    return '';
+  }
+  const data = await res.json();
+  const text = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
+  if (!text) throw new Error('caption revision returned empty response');
+  const parsed = JSON.parse(text);
+  const revised = typeof parsed.text === 'string' ? parsed.text.trim() : '';
+  if (!revised) throw new Error('caption revision returned invalid JSON');
+  return revised;
+}
+
+function buildRevisionPrompt(segment, settings) {
+  const glossary = (settings.captionTerminology || '').trim();
+  return [
+    'You revise one finalized live-caption translation segment for readability.',
+    'Preserve meaning, numbers, names, and timing. Do not add facts. Do not summarize.',
+    'Improve punctuation, spacing, terminology consistency, and subtitle readability.',
+    'Return exactly JSON: {"text":"..."}',
+    glossary ? `Glossary and style rules:\n${glossary}` : 'Glossary and style rules: none',
+    `Target language: ${settings.targetLanguage || segment.targetLanguage || 'unknown'}`,
+    segment.original ? `Source transcript:\n${segment.original}` : 'Source transcript: unavailable',
+    `Translated caption:\n${segment.rawText}`,
+  ].join('\n\n');
+}
+
+async function updateTranscriptSegment(id, patch) {
+  const segments = await getTranscriptSegments();
+  const idx = segments.findIndex(s => s.id === id);
+  if (idx < 0) throw new Error(`transcript segment not found: ${id}`);
+  segments[idx] = { ...segments[idx], ...patch };
+  await chrome.storage.session.set({ [TRANSCRIPT_SEGMENTS_KEY]: segments });
+  return segments[idx];
+}
+
+async function notifyTranscriptSegmentUpdated(segment) {
+  const { activeTabId } = await chrome.storage.session.get('activeTabId');
+  if (!activeTabId) return;
+  try {
+    await chrome.tabs.sendMessage(activeTabId, {
+      type: 'TRANSCRIPT_SEGMENT_UPDATED',
+      segment,
+    });
+  } catch (e) {}
 }
 
 dbg('[SW] Service worker loaded');

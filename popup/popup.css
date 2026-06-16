@@ -428,6 +428,35 @@ body::-webkit-scrollbar-thumb {
   box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
 }
 
+.setting-textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-glass);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  outline: none;
+  transition:
+    border-color 0.25s ease,
+    background 0.25s ease,
+    box-shadow 0.25s ease;
+}
+
+.setting-textarea::placeholder {
+  color: var(--text-tertiary);
+}
+
+.setting-textarea:focus {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
+}
+
 .eye-btn {
   position: absolute;
   right: 4px;

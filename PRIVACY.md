@@ -1,6 +1,6 @@
 # Privacy Policy - Gemini Live Caption
 
-**Last updated:** June 2026
+**Last updated:** June 16, 2026
 
 Gemini Live Caption is a Chrome extension that provides real-time subtitle translation. This policy explains what data flows through the extension and how it is handled.
 
@@ -12,21 +12,25 @@ Gemini Live Caption is a Chrome extension that provides real-time subtitle trans
 
 **Google API key.** You provide your own Gemini API key. It is stored locally in your browser (`chrome.storage.local`) and used solely to authenticate requests to Google's API. We never see, collect, or transmit your API key to any server other than Google's.
 
-**User settings.** Preferences like target language and UI options are stored locally in your browser.
+**User settings.** Preferences like target language, caption style, line-count controls, bilingual display, and terminology/style rules are stored locally in your browser.
 
-**Caption history.** Translated captions are kept in memory while the extension is active. They are discarded when the page closes or the extension is stopped. Nothing is saved to disk.
+**Caption history and transcript segments.** Finalized captions are kept in Chrome's extension session storage (`chrome.storage.session`) so the history panel and SRT export can work reliably across Manifest V3 service-worker restarts. A segment may include the translated caption, the source transcript when Gemini provides it, timing metadata, and the selected target language. The extension keeps up to 1000 finalized segments for the current Chrome session and resets this transcript store when a new capture session starts.
+
+**Optional caption polish.** If you enable finalized-caption polish, the extension sends one finalized segment at a time to Google's Generative Language API for punctuation, terminology consistency, and readability cleanup. That request may include the translated caption, source transcript when available, target language, and your terminology/style rules. This feature is off by default.
 
 **Diagnostic log buffer.** The extension maintains an in-memory ring buffer (200 entries) of recent diagnostic events (connection status, errors, audio processing milestones). This is purely technical information for troubleshooting and is never transmitted off-device. Users can export it manually from the extension popup when seeking support.
 
 ## How Your Data Is Used
 
-The audio stream is sent to Google's Gemini Live Translate API via WebSocket for the sole purpose of real-time translation. The translated text is displayed as a floating overlay on your screen.
+The audio stream is sent to Google's Gemini Live Translate API via WebSocket for the sole purpose of real-time translation. The translated text is displayed as a floating overlay, optionally mirrored into a Picture-in-Picture window, and stored in session memory for transcript history and SRT export.
 
-That's it. There is no secondary use, no profiling, no analytics.
+If finalized-caption polish is enabled, the finalized text segment is sent to Google's Generative Language API for that one polish pass. The extension does not use captions, transcripts, API keys, logs, or settings for advertising, profiling, analytics, or any unrelated purpose.
+
+There is no secondary use, no profiling, no analytics.
 
 ## Free API Key Notice
 
-If you use a **free-tier Gemini API key**, Google's Terms of Service (effective March 2026) state that your audio data may be used for model training and may be reviewed by human annotators. If this is a concern, use a paid API key, which has different data handling terms.
+If you use a **free-tier Gemini API key**, Google's Terms of Service may allow submitted data to be used for model training and human review. If this is a concern, use a paid API key, which may have different data handling terms.
 
 Users in the EEA/UK should be aware that Google's free API tier may not be available in their region per Google's terms. A paid API key may be required.
 
@@ -36,7 +40,7 @@ This extension does not control or influence Google's data handling policies. By
 
 ## Third-Party Data Sharing
 
-Audio data is streamed to **Google** through the Gemini Live Translate API. Google's handling of that data is governed by their own privacy policy:
+Audio data is streamed to **Google** through the Gemini Live Translate API. If finalized-caption polish is enabled, the relevant text segment and terminology/style rules are also sent to **Google** through the Generative Language API. Google's handling of that data is governed by their own privacy policy:
 https://policies.google.com/privacy
 
 We do not share any data with any other third parties.
@@ -45,10 +49,15 @@ We do not share any data with any other third parties.
 
 - **Audio:** Streamed in real-time. Not recorded or stored locally or by us.
 - **API key:** Stored locally on your device only. You can delete it at any time from the extension settings.
-- **Settings:** Stored locally on your device only.
-- **Captions:** Held in memory during active use only. Gone when you close the page.
+- **Settings and terminology rules:** Stored locally on your device only.
+- **Captions and transcript segments:** Stored in Chrome extension session storage for the current Chrome session, capped at 1000 finalized segments, and reset when a new capture session starts. They are used for the history panel and SRT export.
+- **Diagnostic logs:** Held in an in-memory ring buffer and exported only if you click the export button.
 
 We do not operate any servers that collect or store your data.
+
+## Chrome Web Store Limited Use
+
+The use of information received from Google APIs will adhere to the Chrome Web Store User Data Policy, including the Limited Use requirements. The extension uses Google API data only to provide user-visible caption translation, transcript history, optional caption polish, and export features. We do not transfer that data to third parties except as necessary to provide the extension's stated functionality, and we do not use it for advertising, profiling, or training unrelated models.
 
 ## Tracking and Analytics
 
@@ -57,7 +66,8 @@ None. No analytics, no tracking pixels, no telemetry, no fingerprinting. We have
 ## Your Rights
 
 - **Delete your API key:** Open the extension popup and clear it from settings. Done.
-- **Stop using the extension:** Disable or uninstall it. All local data is removed automatically.
+- **Clear transcript history:** Start a new capture session or restart Chrome to clear the session transcript store.
+- **Stop using the extension:** Disable or uninstall it. Chrome removes the extension's local and session storage according to Chrome's extension-storage behavior.
 - **Revoke API access:** Revoke the key from your Google account at any time.
 
 ## Contact

@@ -74,6 +74,9 @@ let reconnectAttempts = 0;
 let captionWatchdogTimer = null;
 let lastCaptionTime = 0;
 let lastAudioSendTime = 0;
+let lastNonSilentAudioTime = 0;
+let lastSilenceProbeTime = 0;
+let silenceTailUntil = 0;
 let sessionRotateTimer = null;
 let sessionStartTime = 0;
 
@@ -96,7 +99,7 @@ const CONFIG = {
   // Transcription processing — sentence-aware segmentation
   GAP_FLUSH_MS: 1200,              // Finalize the current line after 1.2s of silence (was 700)
   MIN_SENTENCE_CHARS: 2,           // A sentence-ending punct finalizes even a short line (≥ this)
-  MIN_FLUSH_CHARS: 10,             // Min length for a comma soft-break / gap fallback flush
+  MIN_FLUSH_CHARS: 10,             // Min length for a comma soft-break / gap pause flush
   SOFT_WRAP_CHARS: 56,             // Only break at a comma once the line is at least this long
   BUFFER_OVERFLOW_LIMIT: 140,      // Hard cap; break at nearest punct/space when exceeded
   PARTIAL_MIN_INTERVAL_MS: 120,    // Throttle live (partial) caption refreshes to reduce flicker
@@ -109,6 +112,10 @@ const CONFIG = {
 
   // Send failure
   MAX_SEND_FAILURES: 5,            // Auto-reconnect after 5 failures
+
+  // Silence handling
+  SILENCE_TAIL_MS: 900,             // Keep enough trailing room for model-side end-of-speech
+  SILENCE_PROBE_INTERVAL_MS: 1500,  // Sparse silence probes keep stream state warm without flooding
 };
 
 // ==================== MESSAGE HANDLER ====================
@@ -148,8 +155,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       workletNode.port.postMessage({ noiseGate: msg.settings.noiseGate });
     }
 
-    // Language change requires WebSocket reconnect with new setup
-    if (msg.settings.targetLanguage) {
+    // Setup-level changes require WebSocket reconnect because Live API session
+    // configuration is immutable after the opening setup message.
+    if (msg.settings.targetLanguage || msg.settings.echoTargetLanguage !== undefined || msg.settings.captionTerminology !== undefined) {
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         reconnectWebSocket();
       }
@@ -184,6 +192,8 @@ async function startCapture(streamId, settings) {
     targetLanguage: settings.targetLanguage || 'zh-Hans',
     audioGain: settings.audioGain ?? 1.0,
     noiseGate: settings.noiseGate ?? 0,
+    echoTargetLanguage: settings.echoTargetLanguage ?? false,
+    captionTerminology: settings.captionTerminology || '',
   };
 
   // Restore bilingualMode from settings
@@ -196,6 +206,15 @@ async function startCapture(streamId, settings) {
   // Reset session state
   reconnectAttempts = 0;
   sendMessageFailCount = 0;
+  lastAudioSendTime = 0;
+  lastNonSilentAudioTime = 0;
+  lastSilenceProbeTime = 0;
+  silenceTailUntil = 0;
+  captionSegmentSeq = 0;
+  activeSegment = null;
+  pendingSourceLanguage = '';
+  pendingTargetLanguage = '';
+  sessionStartTime = Date.now();
 
   // 1. Get the media stream from the tab
   mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -231,7 +250,10 @@ async function startCapture(streamId, settings) {
   // 5. Handle PCM data from AudioWorklet
   workletNode.port.onmessage = (event) => {
     if (event.data.type === 'audio-data') {
-      sendAudioToGemini(event.data.samples);
+      sendAudioToGemini(event.data.pcm, {
+        rms: event.data.rms,
+        hasSpeech: event.data.hasSpeech,
+      });
     }
   };
 
@@ -330,6 +352,9 @@ function stopCapture() {
     clearTimeout(partialThrottleTimer);
     partialThrottleTimer = null;
   }
+  activeSegment = null;
+  pendingSourceLanguage = '';
+  pendingTargetLanguage = '';
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -477,7 +502,7 @@ function buildSetupMessage() {
       responseModalities: ['AUDIO'],
       translationConfig: {
         targetLanguageCode: targetLang,
-        echoTargetLanguage: false,
+        echoTargetLanguage: !!currentSettings.echoTargetLanguage,
       },
     },
     inputAudioTranscription: {},
@@ -489,6 +514,11 @@ function buildSetupMessage() {
     sessionResumption: {},
   };
 
+  setupConfig.systemInstruction = buildTranslationSystemInstruction(
+    targetLang,
+    currentSettings.captionTerminology || ''
+  );
+
   // If we have a resumption handle from a previous session, include it
   if (resumptionHandle) {
     setupConfig.sessionResumption = { handle: resumptionHandle };
@@ -497,23 +527,36 @@ function buildSetupMessage() {
   return { setup: setupConfig };
 }
 
+function buildTranslationSystemInstruction(targetLang, terminology) {
+  const glossary = terminology.trim();
+  const text = [
+    'You are a realtime speech translator producing readable subtitles.',
+    `Translate speech into ${targetLang}. Preserve speaker meaning; do not answer, explain, summarize, or add facts.`,
+    'Keep names, numbers, dates, units, and product terms accurate. Prefer concise subtitle phrasing with natural punctuation.',
+    glossary ? `Terminology and style rules:\n${glossary}` : 'Terminology and style rules: none',
+  ].join('\n');
+  return { parts: [{ text }] };
+}
+
 function sendSetupMessage() {
   websocket.send(JSON.stringify(buildSetupMessage()));
   dbg(`Setup sent: live-translate → ${currentSettings.targetLanguage || 'zh-Hans'}`);
 }
 
 // ==================== AUDIO STREAMING ====================
-function sendAudioToGemini(float32Samples) {
+function sendAudioToGemini(pcmBuffer, activity = {}) {
   if (!websocket || websocket.readyState !== WebSocket.OPEN || !setupComplete) return;
 
-  // Convert Float32 PCM to Int16 PCM (little-endian)
-  const int16 = new Int16Array(float32Samples.length);
-  for (let i = 0; i < float32Samples.length; i++) {
-    const s = Math.max(-1, Math.min(1, float32Samples[i]));
-    int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  const now = Date.now();
+  if (activity.hasSpeech) {
+    lastNonSilentAudioTime = now;
+    silenceTailUntil = now + CONFIG.SILENCE_TAIL_MS;
+  } else if (now > silenceTailUntil) {
+    if (now - lastSilenceProbeTime < CONFIG.SILENCE_PROBE_INTERVAL_MS) return;
+    lastSilenceProbeTime = now;
   }
 
-  const base64 = arrayBufferToBase64(int16.buffer);
+  const base64 = arrayBufferToBase64(pcmBuffer);
 
   // Official live-translate frame shape (2026 docs): realtimeInput.audio holds a
   // single PCM Blob. The legacy realtimeInput.mediaChunks[] array is deprecated.
@@ -527,7 +570,7 @@ function sendAudioToGemini(float32Samples) {
   };
 
   try {
-    lastAudioSendTime = Date.now();
+    lastAudioSendTime = now;
     websocket.send(JSON.stringify(audioMsg));
   } catch (err) {
     console.error('[Offscreen] Failed to send audio:', err);
@@ -554,6 +597,10 @@ let bilingualMode = false;
 let gapFlushTimer = null;
 let lastPartialSentTime = 0;
 let partialThrottleTimer = null;
+let captionSegmentSeq = 0;
+let activeSegment = null;
+let pendingSourceLanguage = '';
+let pendingTargetLanguage = '';
 // Sentence-aware segmentation.
 //   1. Finalize at a sentence-ending punctuation (。！？.!? …) — a real sentence
 //      boundary, kept with any trailing quotes/brackets. Even short sentences
@@ -720,6 +767,10 @@ function logSignals(sc) {
 function handleInterrupted() {
   dbg('Generation interrupted');
   partialText = '';
+  partialInputText = '';
+  activeSegment = null;
+  pendingSourceLanguage = '';
+  pendingTargetLanguage = '';
   sendCaption('', false);
 }
 
@@ -727,9 +778,12 @@ function handleOutputTranscription(sc) {
   if (!sc.outputTranscription || !sc.outputTranscription.text) return;
 
   if (!lastCaptionTime || (Date.now() - lastCaptionTime > 30000)) {
-    dbg(`First caption after ${(Date.now() - (sessionStartTime || Date.now())) / 1000}s gap`);
+    dbg(`First caption after ${(Date.now() - sessionStartTime) / 1000}s gap`);
   }
 
+  const segment = ensureCaptionSegment();
+  pendingTargetLanguage = sc.outputTranscription.languageCode || pendingTargetLanguage;
+  if (pendingTargetLanguage) segment.targetLanguage = pendingTargetLanguage;
   partialText += sc.outputTranscription.text;
   resetCaptionWatchdog();
   sendPartialThrottled();
@@ -749,6 +803,8 @@ function handleOutputTranscription(sc) {
 
 function handleInputTranscription(sc) {
   if (!sc.inputTranscription || !sc.inputTranscription.text) return;
+  pendingSourceLanguage = sc.inputTranscription.languageCode || pendingSourceLanguage;
+  if (activeSegment && pendingSourceLanguage) activeSegment.sourceLanguage = pendingSourceLanguage;
   if (bilingualMode) {
     partialInputText += sc.inputTranscription.text;
   }
@@ -867,6 +923,9 @@ function reconnectWebSocket() {
   setupComplete = false;
   partialText = '';
   partialInputText = '';
+  activeSegment = null;
+  pendingSourceLanguage = '';
+  pendingTargetLanguage = '';
   const t0 = Date.now();
   connectWebSocket().then(() => {
     dbg(`Reconnect successful (took ${Date.now() - t0}ms), waiting for captions...`);
@@ -892,11 +951,11 @@ function startCaptionWatchdog() {
     if (!isCapturing || !setupComplete || isReconnecting || isRotating) return;
     const now = Date.now();
     const sinceCaption = now - lastCaptionTime;
-    const sinceAudio = now - lastAudioSendTime;
+    const sinceAudio = now - lastNonSilentAudioTime;
 
     // Only trigger if:
     // 1. No captions for CAPTION_WATCHDOG_MS (connection likely dead)
-    // 2. Audio WAS sent recently (within 10s) — so it's not just silence
+    // 2. Non-silent audio was observed recently (within 10s) — so it's not just silence
     // If no audio is flowing either, the user is just quiet — leave the connection alone.
     if (sinceCaption > CONFIG.CAPTION_WATCHDOG_MS && sinceAudio < CONFIG.WATCHDOG_AUDIO_THRESHOLD) {
       console.warn(`[Offscreen] Watchdog: no captions for ${Math.round(sinceCaption/1000)}s but audio flowing, forcing reconnect`);
@@ -1178,7 +1237,10 @@ async function _rebuildAudioChain() {
 
     workletNode.port.onmessage = (event) => {
       if (event.data.type === 'audio-data') {
-        sendAudioToGemini(event.data.samples);
+        sendAudioToGemini(event.data.pcm, {
+          rms: event.data.rms,
+          hasSpeech: event.data.hasSpeech,
+        });
       }
     };
   } catch (err) {
@@ -1217,11 +1279,20 @@ function sendCaption(text, isFinal, originalText) {
     partialThrottleTimer = null;
     lastPartialSentTime = 0;
   }
+  const segment = text ? ensureCaptionSegment() : activeSegment;
+  const endedAt = isFinal && segment ? Math.max(Date.now(), segment.startedAt + 1) : null;
   const msg = {
     type: 'CAPTION_UPDATE',
     text,
     isFinal,
   };
+  if (segment) {
+    msg.segmentId = segment.id;
+    msg.startedAt = segment.startedAt;
+    if (isFinal) msg.endedAt = endedAt;
+    msg.sourceLanguage = segment.sourceLanguage || pendingSourceLanguage || '';
+    msg.targetLanguage = segment.targetLanguage || currentSettings.targetLanguage || '';
+  }
   if (bilingualMode) {
     msg.original = originalText || (isFinal ? partialInputText.trim() : '');
     if (isFinal) partialInputText = '';
@@ -1238,6 +1309,23 @@ function sendCaption(text, isFinal, originalText) {
       reconnectWebSocket();
     }
   });
+  if (isFinal) {
+    activeSegment = null;
+    pendingSourceLanguage = '';
+    pendingTargetLanguage = '';
+  }
+}
+
+function ensureCaptionSegment() {
+  if (!activeSegment) {
+    activeSegment = {
+      id: `${sessionStartTime}-${++captionSegmentSeq}`,
+      startedAt: Date.now(),
+      sourceLanguage: pendingSourceLanguage,
+      targetLanguage: pendingTargetLanguage || currentSettings.targetLanguage || '',
+    };
+  }
+  return activeSegment;
 }
 
 function sendStatus(status, message) {

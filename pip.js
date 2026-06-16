@@ -79,9 +79,9 @@
 
     // Settings: max lines
     setupSegment('sp-maxlines', '2', (val) => {
-      maxLines = parseInt(val);
+      maxLines = parseInt(val, 10);
       applyViewportSize();
-      sendSetting('maxLines', maxLines);
+      sendSetting('pipMaxLines', maxLines);
     });
 
     // Settings: opacity
@@ -139,7 +139,10 @@
       if (!event.data || !event.data.type) return;
       switch (event.data.type) {
         case 'CAPTION_UPDATE':
-          show(event.data.text, event.data.isFinal, event.data.original);
+          show(event.data.text, event.data.isFinal, event.data.original, event.data.segment);
+          break;
+        case 'TRANSCRIPT_SEGMENT_UPDATED':
+          applySegmentUpdate(event.data.segment);
           break;
         case 'CLEAR_CAPTIONS':
           clearCaptions();
@@ -153,6 +156,7 @@
           break;
       }
     });
+    notifyReady();
   });
 
   // ==================== SETTINGS HELPERS ====================
@@ -221,19 +225,19 @@
       // (no-op here, swallowed) and then re-applies translations.
       I18N.setLang(s.uiLanguage);
     }
-    if (s.maxLines) {
-      maxLines = s.maxLines;
+    if (s.pipMaxLines) {
+      maxLines = s.pipMaxLines;
       const seg = document.getElementById('sp-maxlines');
       if (seg) seg.querySelectorAll('button').forEach(b => {
-        b.classList.toggle('on', b.dataset.v === String(s.maxLines));
+        b.classList.toggle('on', b.dataset.v === String(s.pipMaxLines));
       });
     }
-    if (s.fontSize || s.maxLines) applyViewportSize();
+    if (s.fontSize || s.pipMaxLines) applyViewportSize();
   }
 
   // ==================== CAPTION VIEWPORT (broadcast-style) ====================
   const COMMITTED_MAX_CHARS = 600;
-  let committedText = '';
+  let committedSegments = [];
   let liveText = '';
 
   function joinSegments(a, b) {
@@ -266,20 +270,24 @@
 
   function renderCaption() {
     if (!flowEl) return;
+    const committedText = committedSegments.reduce((acc, seg) => joinSegments(acc, seg.text), '');
     const display = joinSegments(committedText, liveText);
     if (flowEl.textContent !== display) flowEl.textContent = display;
   }
 
-  function appendCommitted(segment) {
-    const s = segment.trim();
+  function appendCommitted(text, segment) {
+    const s = text.trim();
     if (!s) return;
-    committedText = joinSegments(committedText, s);
-    if (committedText.length > COMMITTED_MAX_CHARS) {
-      committedText = committedText.slice(-COMMITTED_MAX_CHARS);
+    const id = segment?.id;
+    if (!id) return;
+    if (committedSegments.some(item => item.id === id)) return;
+    committedSegments.push({ id, text: s });
+    while (committedSegments.length > 1 && committedSegments.reduce((n, item) => n + item.text.length, 0) > COMMITTED_MAX_CHARS) {
+      committedSegments.shift();
     }
   }
 
-  function show(text, isFinal, originalText) {
+  function show(text, isFinal, originalText, segment) {
     if (!text) {
       if (!isFinal) {
         liveText = '';
@@ -289,15 +297,13 @@
     }
 
     if (isFinal) {
-      if (text.trim() === lastFinalized.trim()) return;
-      lastFinalized = text;
-      appendCommitted(text);
+      const finalKey = segment?.id;
+      if (!finalKey) return;
+      if (finalKey === lastFinalized) return;
+      lastFinalized = finalKey;
+      appendCommitted(text, segment);
       liveText = '';
-
-      const ts = Date.now();
-      captionHistory.push({ text, ts, original: originalText || '' });
-      if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
-      if (historyVisible) appendHistoryEntry(text, ts, originalText);
+      if (isRenderableSegment(segment)) updateCachedSegment(segment);
     } else {
       liveText = text.trim();
     }
@@ -328,7 +334,7 @@
   }
 
   function clearTrack() {
-    committedText = '';
+    committedSegments = [];
     liveText = '';
     lastFinalized = '';
     if (flowEl) flowEl.textContent = '';
@@ -337,6 +343,25 @@
       linesEl.style.display = 'none';
     }
     placeholder.classList.add('show');
+  }
+
+  function applySegmentUpdate(segment) {
+    if (!segment?.id || !segment.text) return;
+    const item = committedSegments.find(s => s.id === segment.id);
+    if (item) {
+      item.text = segment.text;
+      renderCaption();
+    }
+    updateCachedSegment(segment);
+  }
+
+  function updateCachedSegment(segment) {
+    if (!isRenderableSegment(segment)) return;
+    const idx = captionHistory.findIndex(entry => entry.id === segment.id);
+    if (idx >= 0) captionHistory[idx] = { ...captionHistory[idx], ...segment };
+    else captionHistory.push(segment);
+    if (captionHistory.length > CAPTION_HISTORY_SIZE) captionHistory.shift();
+    if (historyVisible) renderHistory();
   }
 
   // ==================== HISTORY PANEL ====================
@@ -399,11 +424,12 @@
 
     // Render all history entries
     for (const entry of captionHistory) {
-      appendHistoryEntry(entry.text, entry.ts, entry.original);
+      if (!isRenderableSegment(entry)) continue;
+      appendHistoryEntry(entry);
     }
   }
 
-  function appendHistoryEntry(text, ts, originalText) {
+  function appendHistoryEntry(entry) {
     if (!historyScroll) return;
 
     const el = document.createElement('div');
@@ -411,22 +437,22 @@
 
     const time = document.createElement('span');
     time.className = 'history-time';
-    const d = new Date(ts);
+    const d = new Date(entry.startTs);
     time.textContent = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 
     const contentEl = document.createElement('div');
     contentEl.className = 'history-content';
 
-    if (originalText) {
+    if (entry.original) {
       const origEl = document.createElement('div');
       origEl.className = 'history-original';
-      origEl.textContent = originalText;
+      origEl.textContent = entry.original;
       contentEl.appendChild(origEl);
     }
 
     const textEl = document.createElement('div');
     textEl.className = 'history-text';
-    textEl.textContent = text;
+    textEl.textContent = entry.text;
     contentEl.appendChild(textEl);
 
     el.appendChild(time);
@@ -445,7 +471,19 @@
     }
   }
 
+  function isRenderableSegment(entry) {
+    return !!entry?.id && !!entry.text && Number.isFinite(entry.startTs) && Number.isFinite(entry.endTs) && entry.endTs > entry.startTs;
+  }
+
   // ==================== LIFECYCLE ====================
+  function notifyReady() {
+    try {
+      if (window.opener) {
+        window.opener.postMessage({ type: 'PIP_READY' }, window.location.origin);
+      }
+    } catch (e) {}
+  }
+
   function notifyClosed() {
     try {
       if (window.opener) {

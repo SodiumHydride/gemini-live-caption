@@ -15,7 +15,7 @@
 
 [English](README.md) | 中文
 
-[安装](#快速开始) · [功能](#功能特点) · [工作原理](#工作原理) · [技术亮点](#技术亮点) · [路线图](#路线图) · [参与贡献](#参与贡献)
+[安装](#快速开始) · [功能](#功能特点) · [工作原理](#工作原理) · [权限说明](#权限说明) · [路线图](#路线图) · [参与贡献](#参与贡献)
 
 <br/>
 
@@ -54,15 +54,16 @@ Chrome 自带的实时字幕只能**转录英文**，不做翻译；大多数直
 **翻译**
 - 🌐 **70+ 语言**实时语音翻译（自动识别源语言）
 - 🌍 **双语模式** —— 原文与译文同时显示
+- ✨ 可选最终字幕润色，支持术语 / 风格规则
 
 **显示**
 - 🪟 浮动字幕浮层 —— 可拖拽、缩放，自定义字体大小、颜色与透明度
-- 📺 **画中画**窗口 —— 切换标签页也始终可见
+- 📺 **画中画**窗口 —— 切换标签页也始终可见，并有独立行数控制
 - 📍 **6 个位置预设**（上/下 × 左/中/右）
 
 **效率**
 - 📜 **字幕历史面板** —— 双击展开，可滚动，带时间戳
-- 💾 **SRT 导出** —— 将字幕历史下载为字幕文件
+- 💾 **SRT 导出** —— 从 service worker 持有的最终字幕记录生成
 
 **可靠性** _（最难的部分 —— 见[技术亮点](#技术亮点)）_
 - 🔄 围绕 Gemini ~10 分钟连接上限的自动会话轮换
@@ -73,6 +74,7 @@ Chrome 自带的实时字幕只能**转录英文**，不做翻译；大多数直
 **隐私**
 - 🔒 无中间服务器 —— 音频从浏览器直连 Google
 - 🔑 API Key 仅存本地，除发往 Google 外不会离开设备
+- 📜 最终字幕保存在 Chrome 会话存储中，用于历史记录与 SRT 导出
 - 🚫 零分析、零追踪、零遥测
 
 ## 快速开始
@@ -120,6 +122,7 @@ Chrome 自带的实时字幕只能**转录英文**，不做翻译；大多数直
 - **专业级 DSP 重采样**（`audio-processor.js`）：Kaiser 窗 FIR 低通，整数比走**多相分解（polyphase）**、非整数比走线性插值 —— 任意输入采样率都能得到干净的 16 kHz 音频。
 - **无缝长会话**（`offscreen.js`）：主动会话轮换、`sessionResumption` 续接句柄、应对服务端静默卡死的字幕看门狗、指数退避重连 —— 全部用于抹平 Gemini Live ~10 分钟会话上限。
 - **崩溃安全的 MV3 编排**（`service-worker.js`）：带心跳 + ping 恢复的状态机，让捕获在易失的 service worker 重启后仍能存活。
+- **权威字幕记录**（`service-worker.js`）：最终字幕片段、SRT 时间轴和可选润色都由 service worker 的会话存储维护，而不是由页面浮层临时拼回。
 - **健壮的页面内 UI**（`content.js`）：`closed` Shadow DOM 完全样式隔离、XSS 安全渲染、`AbortController` 管理监听器，以及在宿主页删除浮层时自我修复的 `MutationObserver`。
 
 ## 路线图
@@ -155,9 +158,23 @@ Chrome 自带的实时字幕只能**转录英文**，不做翻译；大多数直
 - Chrome 116+（需要 Document Picture-in-Picture 与 offscreen document 支持）
 - Gemini API Key —— [aistudio.google.com](https://aistudio.google.com) 提供免费额度
 
+## 权限说明
+
+Gemini Live Caption 只申请捕获当前标签页音频、渲染字幕，以及维持 MV3 扩展可靠性所需的 Chrome 权限：
+
+- `tabCapture`：在你点击开始字幕后，捕获你选择的标签页音频。
+- `offscreen`：在扩展的 offscreen document 中运行音频捕获、AudioWorklet 处理和 Gemini Live WebSocket。
+- `storage`：保存本地设置/API Key，并在会话存储中保留字幕片段，用于历史记录和 SRT 导出。
+- `activeTab`：在你点击扩展或使用快捷键后识别当前标签页。
+- `scripting`：向源标签页注入隔离的字幕浮层。
+- `tabs`：跟踪标签页导航、关闭和替换事件，让捕获能正确停止或恢复。
+
+扩展不申请 host permissions。画中画相关文件被列为 web-accessible resources，是因为 Document Picture-in-Picture 需要从任意页面打开这些静态 UI 资源；这些文件不包含 API Key 或用户数据。
+
 ## 隐私与免责声明
 
-- 音频从浏览器直连 Google Gemini API，无中间服务器。详见[隐私政策](PRIVACY.md)。
+- 音频从浏览器直连 Google Gemini API，无中间服务器。最终字幕会保存在 Chrome 会话存储中，用于历史记录与 SRT 导出。详见[隐私政策](PRIVACY.md)。
+- 可选的最终字幕润色会把最终字幕片段、可用时的源转录文本、术语/风格规则发送到 Google Generative Language API；该功能默认关闭。
 - **免费 Key：** Google 可能将你的音频用于模型训练和人工审核。敏感场景请用付费 Key。见 [Google 条款](https://ai.google.dev/terms)。
 - **合规使用：** 未经许可请勿捕获受版权保护的内容，未经同意请勿录制私人对话。使用 Google Gemini API 需年满 18 岁。
 - 本扩展按"原样"提供，不附带任何形式的担保。

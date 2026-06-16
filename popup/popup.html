@@ -89,6 +89,16 @@
         </select>
       </div>
 
+      <!-- Live Translate Echo -->
+      <div class="setting-group">
+        <label class="setting-label toggle-label">
+          <span data-i18n="setting_echo_target">🔁 Target-Language Echo</span>
+          <input type="checkbox" id="echoTargetLanguage" class="toggle-checkbox">
+          <span class="toggle-switch"></span>
+        </label>
+        <p class="setting-hint" data-i18n="setting_echo_target_hint">Preserve target-language speech in the Live Translate stream</p>
+      </div>
+
       <!-- Font Size -->
       <div class="setting-group">
         <label class="setting-label" data-i18n="setting_font_size">📏 Font Size</label>
@@ -96,16 +106,28 @@
           <button class="seg-btn" data-value="small">S</button>
           <button class="seg-btn active" data-value="medium">M</button>
           <button class="seg-btn" data-value="large">L</button>
+          <button class="seg-btn" data-value="xlarge">XL</button>
         </div>
       </div>
 
-      <!-- Max Lines -->
+      <!-- Overlay Lines -->
       <div class="setting-group">
-        <label class="setting-label" data-i18n="setting_max_lines">📐 Max Lines</label>
-        <div class="segmented-control" id="maxLinesControl">
+        <label class="setting-label" data-i18n="setting_overlay_max_lines">📐 Overlay Lines</label>
+        <div class="segmented-control" id="overlayMaxLinesControl">
           <button class="seg-btn active" data-value="2">2</button>
           <button class="seg-btn" data-value="3">3</button>
           <button class="seg-btn" data-value="4">4</button>
+        </div>
+      </div>
+
+      <!-- PiP Lines -->
+      <div class="setting-group">
+        <label class="setting-label" data-i18n="setting_pip_max_lines">🪟 PiP Lines</label>
+        <div class="segmented-control" id="pipMaxLinesControl">
+          <button class="seg-btn active" data-value="2">2</button>
+          <button class="seg-btn" data-value="3">3</button>
+          <button class="seg-btn" data-value="4">4</button>
+          <button class="seg-btn" data-value="5">5</button>
         </div>
       </div>
 
@@ -161,6 +183,21 @@
           <button class="color-btn" data-value="#81c784" title="Light Green" data-i18n-attr="title:color_light_green" style="background:#81c784"></button>
           <button class="color-btn" data-value="#ff8a65" title="Orange" data-i18n-attr="title:color_orange" style="background:#ff8a65"></button>
         </div>
+      </div>
+
+      <!-- Caption Revision -->
+      <div class="setting-group">
+        <label class="setting-label" data-i18n="setting_caption_revision">✨ Final Caption Polish</label>
+        <div class="segmented-control" id="captionRevisionModeControl">
+          <button class="seg-btn active" data-value="off" data-i18n="revision_off">Off</button>
+          <button class="seg-btn" data-value="polish" data-i18n="revision_polish">Polish</button>
+        </div>
+        <p class="setting-hint" data-i18n="setting_caption_revision_hint">Optional second pass for finalized subtitles; live text stays low-latency</p>
+      </div>
+
+      <div class="setting-group">
+        <label class="setting-label" for="captionTerminology" data-i18n="setting_caption_terminology">📚 Terminology</label>
+        <textarea id="captionTerminology" class="setting-textarea" rows="3" maxlength="4000" spellcheck="false" data-i18n-attr="placeholder:setting_caption_terminology_placeholder" placeholder="One rule per line, e.g. MiHoYo => HoYoverse"></textarea>
       </div>
     </div>
 

@@ -3,7 +3,7 @@
 //
 // Architecture:
 //   Input: Any sample rate mono Float32 from AudioContext (44.1kHz, 48kHz, 96kHz, etc.)
-//   Output (worklet port): 16kHz Float32 PCM chunks (100ms) → Gemini API
+//   Output (worklet port): 16kHz Int16 PCM chunks (100ms) → Gemini API
 //   Pass-through: original audio goes to AudioContext.destination for playback (no resampling)
 
 class AudioCaptureProcessor extends AudioWorkletProcessor {
@@ -102,8 +102,10 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
 
     // Output accumulation buffer: 100ms at 16kHz = 1600 samples
     this.CHUNK_SAMPLES = 1600;
-    this.outputBuffer = new Float32Array(this.CHUNK_SAMPLES);
+    this.outputBuffer = new Int16Array(this.CHUNK_SAMPLES);
     this.outputWriteIdx = 0;
+    this.outputEnergySum = 0;
+    this.outputEnergyCount = 0;
 
     this.initialized = true;
     console.log(`[PolyphaseDecimator] Initialized: ${INPUT_RATE}Hz → ${OUTPUT_RATE}Hz`);
@@ -156,12 +158,7 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
           const phase = this.outputSampleCount % this.M;
           const downsampled = this._applyPolyphaseFilter(phase);
           this.outputSampleCount++;
-          this.outputBuffer[this.outputWriteIdx++] = downsampled;
-
-          if (this.outputWriteIdx >= this.CHUNK_SAMPLES) {
-            this._flushOutputBuffer();
-            this.outputWriteIdx = 0;
-          }
+          this._writeOutputSample(downsampled);
         }
       }
     } else {
@@ -184,12 +181,7 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
           const sample = this.inputBuffer[idx0] * (1 - frac) +
                         this.inputBuffer[idx1] * frac;
 
-          this.outputBuffer[this.outputWriteIdx++] = sample;
-
-          if (this.outputWriteIdx >= this.CHUNK_SAMPLES) {
-            this._flushOutputBuffer();
-            this.outputWriteIdx = 0;
-          }
+          this._writeOutputSample(sample);
 
           this.readPos += this.resampleRatio;
         }
@@ -226,12 +218,32 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     return sum;
   }
 
+  _writeOutputSample(sample) {
+    const s = Math.max(-1, Math.min(1, sample));
+    this.outputEnergySum += s * s;
+    this.outputEnergyCount++;
+    this.outputBuffer[this.outputWriteIdx++] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    if (this.outputWriteIdx >= this.CHUNK_SAMPLES) this._flushOutputBuffer();
+  }
+
   _flushOutputBuffer() {
-    // Send downsampled 16kHz audio
+    const pcm = this.outputBuffer;
+    const rms = Math.sqrt(this.outputEnergySum / Math.max(1, this.outputEnergyCount));
+    const activityThreshold = Math.max(this.noiseGate * 0.5, 0.003);
+
+    this.outputBuffer = new Int16Array(this.CHUNK_SAMPLES);
+    this.outputWriteIdx = 0;
+    this.outputEnergySum = 0;
+    this.outputEnergyCount = 0;
+
+    // Send downsampled little-endian 16kHz PCM. Transfer the backing buffer so
+    // offscreen.js can base64-wrap it without another Float32→Int16 pass.
     this.port.postMessage({
       type: 'audio-data',
-      samples: this.outputBuffer.slice(0),
-    });
+      pcm: pcm.buffer,
+      rms,
+      hasSpeech: rms >= activityThreshold,
+    }, [pcm.buffer]);
   }
 
   // Soft limiter: linear below the knee, smoothly compressed above it so the

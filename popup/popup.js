@@ -129,7 +129,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     I18N.apply(document);
   }
   // Helper that falls back to the literal text when I18N is unavailable.
-  const tr = (key, fallback) => (window.I18N ? I18N.t(key) : fallback);
+  const tr = (key, defaultText) => (window.I18N ? I18N.t(key) : defaultText);
 
   // ==================== DOM ELEMENTS ====================
   const toggleBtn = document.getElementById('toggleBtn');
@@ -147,6 +147,30 @@ document.addEventListener('DOMContentLoaded', async () => {
   const gainValue = document.getElementById('gainValue');
   const noiseGateSlider = document.getElementById('noiseGate');
   const gateValue = document.getElementById('gateValue');
+  const overlayMaxLinesControl = document.getElementById('overlayMaxLinesControl');
+  const pipMaxLinesControl = document.getElementById('pipMaxLinesControl');
+  const echoTargetLanguageCheckbox = document.getElementById('echoTargetLanguage');
+  const bilingualCheckbox = document.getElementById('bilingualMode');
+  const captionRevisionModeControl = document.getElementById('captionRevisionModeControl');
+  const captionTerminologyInput = document.getElementById('captionTerminology');
+
+  function setSegmentedControlValue(control, value) {
+    if (!control || value === undefined || value === null) return;
+    control.querySelectorAll('.seg-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.value === String(value));
+    });
+  }
+
+  function wireSegmentedControl(control, onSelect) {
+    if (!control) return;
+    control.addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      control.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      onSelect(btn.dataset.value);
+    });
+  }
 
   // ==================== DISCLAIMER (first use) ====================
   const disclaimerEl = document.getElementById('disclaimer');
@@ -177,23 +201,21 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ==================== LOAD SETTINGS ====================
   const settings = await chrome.storage.local.get([
-    'apiKey', 'targetLanguage', 'fontSize', 'maxLines', 'bgOpacity', 'audioGain', 'noiseGate', 'captionPosition', 'textColor', 'bilingualMode'
+    'apiKey', 'targetLanguage', 'fontSize', 'overlayMaxLines', 'pipMaxLines',
+    'bgOpacity', 'audioGain', 'noiseGate', 'captionPosition', 'textColor',
+    'bilingualMode', 'echoTargetLanguage', 'captionRevisionMode', 'captionTerminology'
   ]);
 
   if (settings.apiKey) apiKeyInput.value = settings.apiKey;
   if (settings.targetLanguage) targetLanguageSelect.value = settings.targetLanguage;
-  if (settings.fontSize) {
-    fontSizeControl.querySelectorAll('.seg-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.value === settings.fontSize);
-    });
-  }
-  if (settings.maxLines) {
-    const maxLinesControl = document.getElementById('maxLinesControl');
-    if (maxLinesControl) {
-      maxLinesControl.querySelectorAll('.seg-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.value === String(settings.maxLines));
-      });
-    }
+  let currentTargetLanguage = settings.targetLanguage || targetLanguageSelect.value;
+  setSegmentedControlValue(fontSizeControl, settings.fontSize);
+  setSegmentedControlValue(overlayMaxLinesControl, settings.overlayMaxLines);
+  setSegmentedControlValue(pipMaxLinesControl, settings.pipMaxLines);
+  setSegmentedControlValue(captionRevisionModeControl, settings.captionRevisionMode || 'off');
+  if (echoTargetLanguageCheckbox) echoTargetLanguageCheckbox.checked = !!settings.echoTargetLanguage;
+  if (captionTerminologyInput && settings.captionTerminology) {
+    captionTerminologyInput.value = settings.captionTerminology;
   }
   if (settings.bgOpacity !== undefined) {
     const pct = Math.round(settings.bgOpacity * 100);
@@ -210,10 +232,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     noiseGateSlider.value = val;
     gateValue.textContent = val === 0 ? tr('noise_gate_off', 'Off') : `${(val / 1000).toFixed(3)}`;
   }
-  if (settings.bilingualMode) {
-    const bilingualCheckbox = document.getElementById('bilingualMode');
-    if (bilingualCheckbox) bilingualCheckbox.checked = true;
-  }
+  if (bilingualCheckbox) bilingualCheckbox.checked = !!settings.bilingualMode;
   if (settings.captionPosition) {
     const posControl = document.getElementById('positionControl');
     if (posControl) {
@@ -377,7 +396,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     chrome.runtime.sendMessage({
       type: 'SAVE_SETTINGS',
       settings: partial,
-    }).catch(() => {});
+    }).catch(err => console.error('Save settings failed:', err));
   }
 
   apiKeyInput.addEventListener('change', () => {
@@ -385,27 +404,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   targetLanguageSelect.addEventListener('change', () => {
+    currentTargetLanguage = targetLanguageSelect.value;
     saveSettings({ targetLanguage: targetLanguageSelect.value });
   });
 
-  fontSizeControl.addEventListener('click', (e) => {
-    const btn = e.target.closest('.seg-btn');
-    if (!btn) return;
-    fontSizeControl.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    saveSettings({ fontSize: btn.dataset.value });
-  });
-
-  const maxLinesControl = document.getElementById('maxLinesControl');
-  if (maxLinesControl) {
-    maxLinesControl.addEventListener('click', (e) => {
-      const btn = e.target.closest('.seg-btn');
-      if (!btn) return;
-      maxLinesControl.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      saveSettings({ maxLines: parseInt(btn.dataset.value) });
-    });
-  }
+  wireSegmentedControl(fontSizeControl, (value) => saveSettings({ fontSize: value }));
+  wireSegmentedControl(overlayMaxLinesControl, (value) => saveSettings({ overlayMaxLines: parseInt(value, 10) }));
+  wireSegmentedControl(pipMaxLinesControl, (value) => saveSettings({ pipMaxLines: parseInt(value, 10) }));
+  wireSegmentedControl(captionRevisionModeControl, (value) => saveSettings({ captionRevisionMode: value }));
 
   bgOpacitySlider.addEventListener('input', () => {
     const pct = bgOpacitySlider.value;
@@ -465,10 +471,21 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ==================== BILINGUAL MODE ====================
-  const bilingualCheckbox = document.getElementById('bilingualMode');
   if (bilingualCheckbox) {
     bilingualCheckbox.addEventListener('change', () => {
       saveSettings({ bilingualMode: bilingualCheckbox.checked });
+    });
+  }
+
+  if (echoTargetLanguageCheckbox) {
+    echoTargetLanguageCheckbox.addEventListener('change', () => {
+      saveSettings({ echoTargetLanguage: echoTargetLanguageCheckbox.checked });
+    });
+  }
+
+  if (captionTerminologyInput) {
+    captionTerminologyInput.addEventListener('change', () => {
+      saveSettings({ captionTerminology: captionTerminologyInput.value.trim() });
     });
   }
 
@@ -554,7 +571,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       // Re-populate target language picker so optgroup labels get translated
       // (their labels are set imperatively, not via data-i18n).
       populateLanguages(targetLanguageSelect);
-      if (settings.targetLanguage) targetLanguageSelect.value = settings.targetLanguage;
+      targetLanguageSelect.value = currentTargetLanguage;
       // Refresh dynamic captions that were rendered before the switch.
       updateUI(statusBadge.querySelector('.status-dot.active')
         ? 'capturing'
