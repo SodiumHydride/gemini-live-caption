@@ -147,12 +147,6 @@ Chrome 自带的实时字幕只能**转录英文**，不做翻译；大多数直
 
 如果这个项目帮你省了时间，给 [GitHub](https://github.com/SodiumHydride/gemini-live-caption) 点个 ⭐ 能实实在在帮它触达更多人。
 
-## Star 趋势
-
-<a href="https://star-history.com/#SodiumHydride/gemini-live-caption&Date">
-  <img src="https://api.star-history.com/svg?repos=SodiumHydride/gemini-live-caption&type=Date" alt="Star History Chart" width="600" />
-</a>
-
 ## 系统要求
 
 - Chrome 116+（需要 Document Picture-in-Picture 与 offscreen document 支持）

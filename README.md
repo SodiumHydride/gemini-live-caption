@@ -147,12 +147,6 @@ Contributions are welcome — bug reports, feature ideas, and PRs all help.
 
 If this project saves you time, a ⭐ on [GitHub](https://github.com/SodiumHydride/gemini-live-caption) genuinely helps it reach more people.
 
-## Star history
-
-<a href="https://star-history.com/#SodiumHydride/gemini-live-caption&Date">
-  <img src="https://api.star-history.com/svg?repos=SodiumHydride/gemini-live-caption&type=Date" alt="Star History Chart" width="600" />
-</a>
-
 ## Requirements
 
 - Chrome 116+ (for Document Picture-in-Picture and offscreen-document support)

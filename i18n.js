@@ -45,11 +45,13 @@
 
       status_ready: 'Ready',
       status_capturing: 'Capturing',
+      status_capturing_other: 'Capturing another tab',
       status_starting: 'Starting',
 
       toggle_start: 'Start Caption',
       toggle_stop: 'Stop Caption',
       toggle_starting: 'Starting...',
+      toggle_stopping: 'Stopping...',
       toggle_need_key: 'Paste your API key first',
 
       disclaimer_title: 'Before you start',
@@ -132,11 +134,13 @@
 
       status_ready: '就绪',
       status_capturing: '捕获中',
+      status_capturing_other: '正在捕获其他标签页',
       status_starting: '正在启动',
 
       toggle_start: '开始字幕',
       toggle_stop: '停止字幕',
       toggle_starting: '启动中…',
+      toggle_stopping: '停止中…',
       toggle_need_key: '请先填入 API Key',
 
       disclaimer_title: '开始之前',
@@ -219,11 +223,13 @@
 
       status_ready: '就緒',
       status_capturing: '擷取中',
+      status_capturing_other: '正在擷取其他分頁',
       status_starting: '啟動中',
 
       toggle_start: '開始字幕',
       toggle_stop: '停止字幕',
       toggle_starting: '啟動中…',
+      toggle_stopping: '停止中…',
       toggle_need_key: '請先填入 API Key',
 
       disclaimer_title: '開始之前',
@@ -306,11 +312,13 @@
 
       status_ready: '準備完了',
       status_capturing: 'キャプチャ中',
+      status_capturing_other: '別のタブをキャプチャ中',
       status_starting: '起動中',
 
       toggle_start: '字幕を開始',
       toggle_stop: '字幕を停止',
       toggle_starting: '起動中…',
+      toggle_stopping: '停止中…',
       toggle_need_key: 'まず API キーを入力してください',
 
       disclaimer_title: 'はじめに',
@@ -393,11 +401,13 @@
 
       status_ready: '준비됨',
       status_capturing: '캡처 중',
+      status_capturing_other: '다른 탭 캡처 중',
       status_starting: '시작 중',
 
       toggle_start: '자막 시작',
       toggle_stop: '자막 중지',
       toggle_starting: '시작 중…',
+      toggle_stopping: '중지 중…',
       toggle_need_key: 'API 키를 먼저 입력하세요',
 
       disclaimer_title: '시작하기 전에',
@@ -480,11 +490,13 @@
 
       status_ready: 'Listo',
       status_capturing: 'Capturando',
+      status_capturing_other: 'Capturando otra pestaña',
       status_starting: 'Iniciando',
 
       toggle_start: 'Iniciar subtítulos',
       toggle_stop: 'Detener subtítulos',
       toggle_starting: 'Iniciando…',
+      toggle_stopping: 'Deteniendo…',
       toggle_need_key: 'Pega primero tu clave API',
 
       disclaimer_title: 'Antes de empezar',

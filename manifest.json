@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Gemini Live Caption",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Real-time translated captions for any tab audio — end-to-end Gemini 3.5 Live Translate, 70+ languages, Picture-in-Picture.",
   "author": "NaH",
   "homepage_url": "https://github.com/SodiumHydride/gemini-live-caption",
@@ -37,7 +37,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["pip.html", "pip.css", "pip.js", "i18n.js"],
+      "resources": ["pip.html", "pip.css", "pip.js", "i18n.js", "caption-track.js"],
       "matches": ["<all_urls>"]
     }
   ]

@@ -13,6 +13,8 @@ const dbg = (...args) => DEBUG && console.log(...args);
 const TRANSCRIPT_SEGMENTS_KEY = 'transcriptSegments';
 const TRANSCRIPT_SESSION_KEY = 'transcriptSession';
 const TRANSCRIPT_LIMIT = 1000;
+const SRT_MIN_DURATION_MS = 833;
+const SRT_MAX_DURATION_MS = 7000;
 const REVISION_MODES = new Set(['off', 'polish']);
 const REVISION_MODEL = 'gemini-3.5-flash';
 let revisionQueue = Promise.resolve();
@@ -227,8 +229,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         await toggleCapture(msg.tabId);
-        const { captureState = 'idle' } = await chrome.storage.session.get('captureState');
-        sendResponse({ success: true, state: captureState });
+        const { captureState = 'idle', activeTabId = null } =
+          await chrome.storage.session.get(['captureState', 'activeTabId']);
+        sendResponse({ success: true, state: captureState, tabId: activeTabId });
       } catch (err) {
         console.error('[SW] Toggle capture error:', err);
         sendResponse({ success: false, error: err.message });
@@ -497,21 +500,6 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // ==================== CORE FUNCTIONS ====================
 
 async function toggleCapture(tabId) {
-  // Block capture until disclaimer is accepted
-  const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
-  if (!disclaimerAccepted) {
-    dbg('[SW] Disclaimer not accepted, blocking capture');
-    // Open popup so user can see and accept the disclaimer
-    try {
-      await chrome.action.openPopup();
-    } catch (e) {
-      // openPopup may fail without user gesture — show badge hint
-      await chrome.action.setBadgeText({ text: '!' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
-    }
-    return;
-  }
-
   const { captureState = 'idle', activeTabId } = await chrome.storage.session.get(['captureState', 'activeTabId']);
 
   // Ignore if in transition
@@ -520,21 +508,35 @@ async function toggleCapture(tabId) {
     return;
   }
 
-  if (captureState === 'idle') {
-    await startCapture(tabId);
-  } else if (captureState === 'capturing') {
-    if (activeTabId === tabId) {
-      // Same tab, stop capture
-      await stopCapture();
-    } else {
-      // Different tab, switch capture
-      try {
-        await stopCapture();
-      } catch (e) {
-        console.warn('[SW] stopCapture failed during switch:', e);
-      }
-      await startCapture(tabId);
+  if (captureState === 'capturing') {
+    // The main toggle is a global capture switch. If tab A owns the audio
+    // session and the user opens the popup or shortcut from tab B, the intent is
+    // to stop the running session, not to silently move capture to B.
+    if (activeTabId && activeTabId !== tabId) {
+      dbg(`[SW] Toggle from tab ${tabId} stopping source tab ${activeTabId}`);
     }
+    await stopCapture();
+    return;
+  }
+
+  if (captureState === 'idle') {
+    // Block new captures until disclaimer is accepted. Stop actions are never
+    // gated by start prerequisites.
+    const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
+    if (!disclaimerAccepted) {
+      dbg('[SW] Disclaimer not accepted, blocking capture');
+      // Open popup so user can see and accept the disclaimer
+      try {
+        await chrome.action.openPopup();
+      } catch (e) {
+        // openPopup may fail without user gesture — show badge hint
+        await chrome.action.setBadgeText({ text: '!' });
+        await chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
+      }
+      return;
+    }
+
+    await startCapture(tabId);
   }
 }
 
@@ -695,12 +697,13 @@ async function ensureContentScript(tabId) {
   // Always inject. content.js's init() is idempotent — if the host element
   // already exists it returns immediately. A fresh injection guarantees the
   // message listener is wired to the current extension context, not a stale one.
-  // i18n.js is injected first so window.I18N is available to content.js.
+  // i18n.js and caption-track.js are injected first so content.js receives
+  // localization and the shared subtitle state module before it initializes.
   dbg('[SW] Ensuring content script in tab', tabId);
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['i18n.js', 'content.js'],
+      files: ['i18n.js', 'caption-track.js', 'content.js'],
     });
   } catch (e) {
     console.warn('[SW] Content script injection:', e.message);
@@ -763,7 +766,11 @@ function formatSRT(segments) {
   const startTime = valid[0].startTs;
   return valid.map((entry, i) => {
     const start = entry.startTs - startTime;
-    const end = entry.endTs - startTime;
+    const next = valid[i + 1];
+    let endTs = Math.max(entry.endTs, entry.startTs + SRT_MIN_DURATION_MS);
+    endTs = Math.min(endTs, entry.startTs + SRT_MAX_DURATION_MS);
+    if (next && endTs >= next.startTs) endTs = Math.max(entry.startTs + 1, next.startTs - 1);
+    const end = endTs - startTime;
     const body = entry.original ? `${entry.original}\n${entry.text}` : entry.text;
     return `${i + 1}\n${formatSRTTime(start)} --> ${formatSRTTime(end)}\n${body}\n`;
   }).join('\n');

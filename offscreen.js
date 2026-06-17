@@ -100,8 +100,10 @@ const CONFIG = {
   GAP_FLUSH_MS: 1200,              // Finalize the current line after 1.2s of silence (was 700)
   MIN_SENTENCE_CHARS: 2,           // A sentence-ending punct finalizes even a short line (≥ this)
   MIN_FLUSH_CHARS: 10,             // Min length for a comma soft-break / gap pause flush
-  SOFT_WRAP_CHARS: 56,             // Only break at a comma once the line is at least this long
-  BUFFER_OVERFLOW_LIMIT: 140,      // Hard cap; break at nearest punct/space when exceeded
+  LATIN_SOFT_WRAP_UNITS: 42,       // Industry subtitle line target for Latin-script text
+  CJK_SOFT_WRAP_UNITS: 23,         // Common CJK subtitle line target
+  LATIN_OVERFLOW_UNITS: 84,        // Two-line hard cap before forced split
+  CJK_OVERFLOW_UNITS: 46,          // Two-line hard cap before forced split
   PARTIAL_MIN_INTERVAL_MS: 120,    // Throttle live (partial) caption refreshes to reduce flicker
 
   // Heartbeat
@@ -605,12 +607,13 @@ let pendingTargetLanguage = '';
 //   1. Finalize at a sentence-ending punctuation (。！？.!? …) — a real sentence
 //      boundary, kept with any trailing quotes/brackets. Even short sentences
 //      finalize (MIN_SENTENCE_CHARS) so brief lines don't merge into the next.
-//   2. Commas/semicolons only break once the line is past SOFT_WRAP_CHARS, so a
-//      sentence isn't chopped into tiny lines while still capping line length.
+//   2. Commas/semicolons only break once the translated line reaches the target
+//      script's subtitle length, so a sentence isn't chopped into tiny fragments.
 // CJK enders split anywhere; ASCII .!? require a trailing space/end so we don't
 // split decimals (1.5) or break mid-token.
 const SENTENCE_END_RE = /[。！？…]+["'”’)\]】»」』]*|[.!?]+["'”’)\]]*(?=\s|$)/g;
 const SOFT_BREAK_RE = /[，,、；;]/g;
+const CJK_TEXT_RE = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
 
 function flushFinal(cutAt) {
   if (gapFlushTimer) { clearTimeout(gapFlushTimer); gapFlushTimer = null; }
@@ -660,11 +663,13 @@ function tryFlushAtPunctuation() {
   }
 
   // Pass 2: soft break at comma/semicolon, but only on an already-long line.
-  if (partialText.length >= CONFIG.SOFT_WRAP_CHARS) {
+  if (captionUnits(partialText) >= softWrapUnits()) {
     let lastIdx = -1;
     SOFT_BREAK_RE.lastIndex = 0;
     while ((m = SOFT_BREAK_RE.exec(partialText)) !== null) {
-      if (m.index + 1 >= CONFIG.MIN_FLUSH_CHARS) lastIdx = m.index + 1;
+      if (captionUnits(partialText.slice(0, m.index + 1)) >= CONFIG.MIN_FLUSH_CHARS) {
+        lastIdx = m.index + 1;
+      }
     }
     if (lastIdx > 0) {
       flushFinal(lastIdx);
@@ -673,6 +678,23 @@ function tryFlushAtPunctuation() {
   }
 
   return false;
+}
+
+function captionUnits(text) {
+  return String(text || '').trim().length;
+}
+
+function isCjkCaptionText(text = partialText) {
+  const lang = (pendingTargetLanguage || currentSettings.targetLanguage || '').toLowerCase();
+  return /^(zh|ja|ko)/.test(lang) || CJK_TEXT_RE.test(text);
+}
+
+function softWrapUnits() {
+  return isCjkCaptionText() ? CONFIG.CJK_SOFT_WRAP_UNITS : CONFIG.LATIN_SOFT_WRAP_UNITS;
+}
+
+function overflowUnits() {
+  return isCjkCaptionText() ? CONFIG.CJK_OVERFLOW_UNITS : CONFIG.LATIN_OVERFLOW_UNITS;
 }
 
 function handleGeminiResponse(msg) {
@@ -804,9 +826,17 @@ function handleOutputTranscription(sc) {
 function handleInputTranscription(sc) {
   if (!sc.inputTranscription || !sc.inputTranscription.text) return;
   pendingSourceLanguage = sc.inputTranscription.languageCode || pendingSourceLanguage;
-  if (activeSegment && pendingSourceLanguage) activeSegment.sourceLanguage = pendingSourceLanguage;
+  if (!activeSegment && !partialText.trim()) {
+    // Source transcripts can lag the translated output. If there is no active
+    // target segment, do not attach orphan source text to the next translation.
+    resetCaptionWatchdog();
+    return;
+  }
+  const segment = activeSegment || ensureCaptionSegment();
+  if (pendingSourceLanguage) segment.sourceLanguage = pendingSourceLanguage;
   if (bilingualMode) {
     partialInputText += sc.inputTranscription.text;
+    if (partialText.trim()) sendPartialThrottled();
   }
   resetCaptionWatchdog();
 }
@@ -828,20 +858,29 @@ function handleTurnComplete(sc) {
 }
 
 function handleBufferOverflow() {
-  if (partialText.length <= CONFIG.BUFFER_OVERFLOW_LIMIT) return;
+  const limit = overflowUnits();
+  if (captionUnits(partialText) <= limit) return;
 
   // Prefer a natural break (punctuation or whitespace) at or before the limit so
   // we never cut mid-word; fall back to a hard cap only if nothing better exists.
-  const limit = CONFIG.BUFFER_OVERFLOW_LIMIT;
   const breakChars = /[。！？.!?…，,、；;：:\s]/g;
   let cut = -1;
   let m;
   while ((m = breakChars.exec(partialText)) !== null) {
-    if (m.index + 1 <= limit) cut = m.index + 1; else break;
+    if (captionUnits(partialText.slice(0, m.index + 1)) <= limit) cut = m.index + 1; else break;
   }
-  if (cut < CONFIG.MIN_FLUSH_CHARS) cut = limit; // no good break — hard cap
+  if (cut < CONFIG.MIN_FLUSH_CHARS) cut = hardCutIndex(partialText, limit);
   console.warn(`[Offscreen] Buffer overflow, flushing ${cut} chars`);
   flushFinal(cut);
+}
+
+function hardCutIndex(text, unitLimit) {
+  if (!isCjkCaptionText(text)) {
+    const near = text.slice(0, unitLimit + 1);
+    const lastSpace = near.lastIndexOf(' ');
+    if (lastSpace >= CONFIG.MIN_FLUSH_CHARS) return lastSpace + 1;
+  }
+  return Math.min(text.length, unitLimit);
 }
 
 function handleGenerationComplete(sc) {
@@ -1294,7 +1333,7 @@ function sendCaption(text, isFinal, originalText) {
     msg.targetLanguage = segment.targetLanguage || currentSettings.targetLanguage || '';
   }
   if (bilingualMode) {
-    msg.original = originalText || (isFinal ? partialInputText.trim() : '');
+    msg.original = originalText || partialInputText.trim();
     if (isFinal) partialInputText = '';
   }
   chrome.runtime.sendMessage(msg).then(() => {

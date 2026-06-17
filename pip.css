@@ -97,10 +97,43 @@ html, body {
   user-select: text;
   -webkit-user-select: text;
   cursor: text;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+  display: flex;
+  flex-direction: column;
+  gap: .12em;
+}
+
+.caption-row {
+  display: flex;
+  flex-direction: column;
+  gap: .05em;
+  min-width: 0;
+}
+
+.line-original {
+  color: rgba(255,255,255,0.62);
+  font-size: .64em;
+  font-weight: 500;
+  line-height: 1.25;
+  text-align: center;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.75);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
 }
 
 .line-translated {
   color: var(--cap-text);
+  font-size: 1em;
+  font-weight: 650;
+  line-height: var(--cap-line-h, 1.4);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  -webkit-box-orient: vertical;
 }
 
 /* ── Placeholder ───────────────────────────────────────── */
@@ -382,5 +415,10 @@ html, body {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .flow {
+    transition: none !important;
+    transform: none !important;
   }
 }

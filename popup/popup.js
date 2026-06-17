@@ -153,6 +153,32 @@ document.addEventListener('DOMContentLoaded', async () => {
   const bilingualCheckbox = document.getElementById('bilingualMode');
   const captionRevisionModeControl = document.getElementById('captionRevisionModeControl');
   const captionTerminologyInput = document.getElementById('captionTerminology');
+  let currentPopupTabId = null;
+  let lastCaptureStatus = { state: 'idle', tabId: null };
+
+  async function getCurrentPopupTabId() {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab?.id ?? null;
+  }
+
+  function normalizeCaptureStatus(status) {
+    if (typeof status === 'string') {
+      return { state: status, tabId: lastCaptureStatus.tabId ?? null };
+    }
+    return {
+      state: status?.state || 'idle',
+      tabId: status?.tabId ?? null,
+    };
+  }
+
+  async function refreshCaptureStatus() {
+    try {
+      lastCaptureStatus = normalizeCaptureStatus(await chrome.runtime.sendMessage({ type: 'GET_STATUS' }));
+    } catch (e) {
+      lastCaptureStatus = { state: 'idle', tabId: null };
+    }
+    updateUI(lastCaptureStatus);
+  }
 
   function setSegmentedControlValue(control, value) {
     if (!control || value === undefined || value === null) return;
@@ -251,12 +277,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ==================== GET CURRENT STATUS ====================
-  try {
-    const status = await chrome.runtime.sendMessage({ type: 'GET_STATUS' });
-    updateUI(status.state);
-  } catch (e) {
-    updateUI('idle');
-  }
+  currentPopupTabId = await getCurrentPopupTabId();
+  await refreshCaptureStatus();
 
   // ==================== PiP STATUS ====================
   const displayModeInfo = document.querySelector('.display-mode-info');
@@ -287,52 +309,60 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (area === 'session' && changes.pipWindowOpen) {
       updatePipStatus();
     }
-    if (area === 'session' && changes.captureState) {
-      updateUI(changes.captureState.newValue);
+    if (area === 'session' && (changes.captureState || changes.activeTabId)) {
+      refreshCaptureStatus();
     }
   });
 
   // ==================== TOGGLE CAPTURE ====================
   toggleBtn.addEventListener('click', async () => {
-    // Check disclaimer acceptance first
-    const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
-    if (!disclaimerAccepted) {
-      if (disclaimerEl) {
-        disclaimerEl.style.display = '';
-        disclaimerEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        disclaimerEl.classList.remove('pulse');
-        disclaimerEl.offsetHeight; // force reflow
-        disclaimerEl.classList.add('pulse');
-      }
-      return;
-    }
+    await refreshCaptureStatus();
+    const stoppingExistingCapture = lastCaptureStatus.state === 'capturing';
 
-    // Check API key — guide the user toward getting one if missing
-    if (!apiKeyInput.value.trim()) {
-      apiKeyInput.focus();
-      apiKeyInput.style.borderColor = '#FF4444';
-      const prevLabel = toggleLabel.textContent;
-      const hint = tr('toggle_need_key', 'Paste your API key first');
-      toggleLabel.textContent = hint;
-      setTimeout(() => {
-        apiKeyInput.style.borderColor = '';
-        // Only restore if no other state change overwrote our hint
-        if (toggleLabel.textContent === hint) {
-          toggleLabel.textContent = prevLabel;
+    if (!stoppingExistingCapture) {
+      // Check disclaimer acceptance before starting capture.
+      const { disclaimerAccepted } = await chrome.storage.local.get('disclaimerAccepted');
+      if (!disclaimerAccepted) {
+        if (disclaimerEl) {
+          disclaimerEl.style.display = '';
+          disclaimerEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          disclaimerEl.classList.remove('pulse');
+          disclaimerEl.offsetHeight; // force reflow
+          disclaimerEl.classList.add('pulse');
         }
-      }, 2000);
-      return;
+        return;
+      }
+
+      // Check API key — guide the user toward getting one if missing.
+      if (!apiKeyInput.value.trim()) {
+        apiKeyInput.focus();
+        apiKeyInput.style.borderColor = '#FF4444';
+        const prevLabel = toggleLabel.textContent;
+        const hint = tr('toggle_need_key', 'Paste your API key first');
+        toggleLabel.textContent = hint;
+        setTimeout(() => {
+          apiKeyInput.style.borderColor = '';
+          // Only restore if no other state change overwrote our hint
+          if (toggleLabel.textContent === hint) {
+            toggleLabel.textContent = prevLabel;
+          }
+        }, 2000);
+        return;
+      }
+
+      // Explicitly save API key before starting (change event may not have fired).
+      saveSettings({ apiKey: apiKeyInput.value.trim() });
     }
 
     toggleBtn.disabled = true;
-    toggleLabel.textContent = tr('toggle_starting', 'Starting...');
-
-    // Explicitly save API key before toggling (change event may not have fired)
-    saveSettings({ apiKey: apiKeyInput.value.trim() });
+    toggleLabel.textContent = stoppingExistingCapture
+      ? tr('toggle_stopping', 'Stopping...')
+      : tr('toggle_starting', 'Starting...');
 
     try {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) throw new Error('No active tab');
+      currentPopupTabId = tab.id;
 
       const response = await chrome.runtime.sendMessage({
         type: 'TOGGLE_CAPTURE',
@@ -340,7 +370,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       });
 
       if (response.success) {
-        updateUI(response.state);
+        lastCaptureStatus = normalizeCaptureStatus(response);
+        updateUI(lastCaptureStatus);
       } else {
         console.error('Toggle failed:', response.error);
         updateUI('idle');
@@ -357,7 +388,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   });
 
   // ==================== UI STATE ====================
-  function updateUI(state) {
+  function updateUI(statusInput) {
+    const status = normalizeCaptureStatus(statusInput);
+    lastCaptureStatus = status;
+    const state = status.state;
+    const capturesAnotherTab = state === 'capturing' &&
+      status.tabId !== null &&
+      currentPopupTabId !== null &&
+      status.tabId !== currentPopupTabId;
     const statusDot = statusBadge.querySelector('.status-dot');
     const statusText = statusBadge.querySelector('.status-text');
 
@@ -368,7 +406,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       toggleIcon.textContent = '⏹';
       toggleLabel.textContent = tr('toggle_stop', 'Stop Caption');
       statusDot.className = 'status-dot active';
-      statusText.textContent = tr('status_capturing', 'Capturing');
+      statusText.textContent = capturesAnotherTab
+        ? tr('status_capturing_other', 'Capturing another tab')
+        : tr('status_capturing', 'Capturing');
     } else if (state === 'starting') {
       toggleBtn.disabled = true;
       toggleIcon.textContent = '⏳';
@@ -573,9 +613,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       populateLanguages(targetLanguageSelect);
       targetLanguageSelect.value = currentTargetLanguage;
       // Refresh dynamic captions that were rendered before the switch.
-      updateUI(statusBadge.querySelector('.status-dot.active')
-        ? 'capturing'
-        : statusBadge.querySelector('.status-dot.starting') ? 'starting' : 'idle');
+      updateUI(lastCaptureStatus);
       // Noise gate "Off" label, if currently off
       if (parseInt(noiseGateSlider.value) === 0) {
         gateValue.textContent = tr('noise_gate_off', 'Off');

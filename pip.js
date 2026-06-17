@@ -9,6 +9,9 @@
 
 (function () {
   'use strict';
+  if (!window.CaptionTrack) {
+    throw new Error('caption-track.js must be loaded before pip.js');
+  }
 
   const FONT_MAP = { small: '20px', medium: '28px', large: '36px', xlarge: '44px' };
   const FADE_TIMEOUT = 15000;
@@ -18,10 +21,11 @@
   let historyVisible = false;
   let maxLines = 2;
   let fadeTimer = null;
+  let captionRollFrame = 0;
+  let captionRollTimer = 0;
   let capturing = false;
-
-  // Dedup state
-  let lastFinalized = '';
+  let bilingualMode = false;
+  const captionTrack = window.CaptionTrack.create({ bilingualMode, maxChars: 720 });
 
   // Caption history buffer
   const CAPTION_HISTORY_SIZE = 500;
@@ -139,7 +143,7 @@
       if (!event.data || !event.data.type) return;
       switch (event.data.type) {
         case 'CAPTION_UPDATE':
-          show(event.data.text, event.data.isFinal, event.data.original, event.data.segment);
+          show(event.data.text, event.data.isFinal, event.data.original, event.data.segment, { source: event.data.source || 'live' });
           break;
         case 'TRANSCRIPT_SEGMENT_UPDATED':
           applySegmentUpdate(event.data.segment);
@@ -218,7 +222,9 @@
       });
     }
     if (s.bilingualMode !== undefined) {
-      // bilingualMode state is informational for PiP; rendering handled by content.js
+      bilingualMode = !!s.bilingualMode;
+      captionTrack.configure({ bilingualMode });
+      renderCaption();
     }
     if (s.uiLanguage && window.I18N) {
       // Mirror the popup's UI language. setLang() tries chrome.storage.set
@@ -232,87 +238,182 @@
         b.classList.toggle('on', b.dataset.v === String(s.pipMaxLines));
       });
     }
-    if (s.fontSize || s.pipMaxLines) applyViewportSize();
+    if (s.fontSize || s.pipMaxLines || s.bilingualMode !== undefined) applyViewportSize();
   }
 
-  // ==================== CAPTION VIEWPORT (broadcast-style) ====================
-  const COMMITTED_MAX_CHARS = 600;
-  let committedSegments = [];
-  let liveText = '';
-
-  function joinSegments(a, b) {
-    const left = (a || '').trim();
-    const right = (b || '').trim();
-    if (!left) return right;
-    if (!right) return left;
-    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]$/.test(left)) return left + right;
-    return left + ' ' + right;
-  }
+  // ==================== CAPTION VIEWPORT ====================
+  // Caption-track owns subtitle facts. PiP renders snapshots and only animates
+  // live row advances, not replay/hydration backfill.
+  const CAP_LINE_HEIGHT_RATIO = 1.36;
+  const CAP_SECONDARY_HEIGHT_RATIO = 0.84;
+  const CAP_ROW_GAP_RATIO = 0.12;
+  const CAP_LINE_WIDTH_FACTOR = 0.88;
+  const CAP_ROLL_BUFFER_ROWS = 1;
 
   function applyViewportSize() {
     if (!flowEl) return;
+    const fontSize = measureFontSizePx();
     const lh = measureLineHeightPx();
+    const model = captionTrack.snapshot();
+    const hasOriginal = model.rows.some(row => row.secondary);
+    const secondaryHeight = hasOriginal ? fontSize * CAP_SECONDARY_HEIGHT_RATIO : 0;
+    const rowGap = fontSize * CAP_ROW_GAP_RATIO;
     document.documentElement.style.setProperty('--cap-line-h', `${lh}px`);
-    document.documentElement.style.setProperty('--cap-viewport-h', `${lh * maxLines}px`);
+    document.documentElement.style.setProperty('--cap-viewport-h', `${(lh + secondaryHeight) * maxLines + rowGap * Math.max(0, maxLines - 1)}px`);
+  }
+
+  function measureFontSizePx() {
+    if (!flowEl) return 28;
+    const target = flowEl.querySelector('.line-translated') || flowEl;
+    const cs = getComputedStyle(target);
+    return parseFloat(cs.fontSize) || 16;
   }
 
   function measureLineHeightPx() {
-    if (!flowEl) return 28;
-    const cs = getComputedStyle(flowEl);
-    const fontSize = parseFloat(cs.fontSize) || 16;
-    const lh = parseFloat(cs.lineHeight);
-    return Number.isFinite(lh) ? lh : fontSize * 1.4;
+    return measureFontSizePx() * CAP_LINE_HEIGHT_RATIO;
   }
 
   function computeViewportHeight() {
-    return measureLineHeightPx() * maxLines;
+    const fontSize = measureFontSizePx();
+    const hasOriginal = captionTrack.snapshot().rows.some(row => row.secondary);
+    const rowHeight = measureLineHeightPx() + (hasOriginal ? fontSize * CAP_SECONDARY_HEIGHT_RATIO : 0);
+    return rowHeight * maxLines + fontSize * CAP_ROW_GAP_RATIO * Math.max(0, maxLines - 1);
   }
 
-  function renderCaption() {
-    if (!flowEl) return;
-    const committedText = committedSegments.reduce((acc, seg) => joinSegments(acc, seg.text), '');
-    const display = joinSegments(committedText, liveText);
-    if (flowEl.textContent !== display) flowEl.textContent = display;
+  function computeLineUnits() {
+    if (!flowEl) return 42;
+    const fontSize = measureFontSizePx();
+    const width = flowEl.clientWidth || linesEl?.clientWidth || 0;
+    if (!width || !fontSize) return 42;
+    return Math.max(10, (width / fontSize) * CAP_LINE_WIDTH_FACTOR);
   }
 
-  function appendCommitted(text, segment) {
-    const s = text.trim();
-    if (!s) return;
-    const id = segment?.id;
-    if (!id) return;
-    if (committedSegments.some(item => item.id === id)) return;
-    committedSegments.push({ id, text: s });
-    while (committedSegments.length > 1 && committedSegments.reduce((n, item) => n + item.text.length, 0) > COMMITTED_MAX_CHARS) {
-      committedSegments.shift();
+  function computeRollStep() {
+    return measureLineHeightPx() + measureFontSizePx() * CAP_ROW_GAP_RATIO;
+  }
+
+  function prefersReducedMotion() {
+    return typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  function resetCaptionRoll() {
+    if (captionRollFrame) {
+      cancelAnimationFrame(captionRollFrame);
+      captionRollFrame = 0;
+    }
+    if (captionRollTimer) {
+      clearTimeout(captionRollTimer);
+      captionRollTimer = 0;
+    }
+    if (flowEl) {
+      flowEl.style.transition = '';
+      flowEl.style.transform = '';
     }
   }
 
-  function show(text, isFinal, originalText, segment) {
+  function animateCaptionRoll(previousHeight, hadPreviousText, preferredDistance) {
+    resetCaptionRoll();
+    if (!flowEl || prefersReducedMotion()) return;
+
+    const nextHeight = flowEl.scrollHeight;
+    const delta = nextHeight - (Number.isFinite(previousHeight) ? previousHeight : 0);
+    const measuredDistance = delta > 1 ? Math.min(computeViewportHeight(), delta) : 0;
+    const distance = Number.isFinite(preferredDistance) && preferredDistance > 1
+      ? preferredDistance
+      : measuredDistance;
+    if (!hadPreviousText || distance <= 1) return;
+    if (!Number.isFinite(distance) || distance <= 1) return;
+
+    flowEl.style.transition = 'none';
+    flowEl.style.transform = `translate3d(0, ${distance}px, 0)`;
+    flowEl.getBoundingClientRect();
+
+    captionRollFrame = requestAnimationFrame(() => {
+      captionRollFrame = 0;
+      if (!flowEl) return;
+      flowEl.style.transition = 'transform 260ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1))';
+      flowEl.style.transform = 'translate3d(0, 0, 0)';
+      captionRollTimer = setTimeout(() => {
+        captionRollTimer = 0;
+        if (flowEl) flowEl.style.transition = '';
+      }, 280);
+    });
+  }
+
+  function renderCaption(model = captionTrack.snapshot()) {
+    if (!flowEl) return { changed: false, rowAdvanced: false, rollDistance: 0 };
+    const sourceRows = model.rows.length
+      ? model.rows
+      : (model.primaryText || model.secondaryText ? [{ id: 'single', primary: model.primaryText, secondary: model.secondaryText, live: true }] : []);
+    const shaped = window.CaptionTrack.shapeRows(sourceRows, {
+      maxRows: maxLines + CAP_ROLL_BUFFER_ROWS,
+      maxUnits: computeLineUnits(),
+    });
+    const rows = shaped.rows;
+    const signature = rows.map(row => `${row.id}:${row.live ? '1' : '0'}:${row.secondary}\n${row.primary}`).join('\n---\n');
+    const previousTailKey = flowEl.dataset.captionTailKey || '';
+    const previousTotalRows = parseInt(flowEl.dataset.captionTotalRows || '0', 10) || 0;
+    const rowAdvanced = !!previousTailKey && shaped.tailKey !== previousTailKey && shaped.totalRows > previousTotalRows;
+    if (flowEl.dataset.captionSignature === signature) {
+      flowEl.dataset.captionTailKey = shaped.tailKey;
+      flowEl.dataset.captionTotalRows = String(shaped.totalRows);
+      return { changed: false, rowAdvanced, rollDistance: computeRollStep() };
+    }
+    flowEl.dataset.captionSignature = signature;
+    flowEl.dataset.captionTailKey = shaped.tailKey;
+    flowEl.dataset.captionTotalRows = String(shaped.totalRows);
+
+    const nodes = rows.map(row => {
+      const rowEl = document.createElement('div');
+      rowEl.className = row.live ? 'caption-row live' : 'caption-row';
+      if (row.secondary) {
+        const original = document.createElement('div');
+        original.className = 'line-original';
+        original.textContent = row.secondary;
+        rowEl.appendChild(original);
+      }
+      if (row.primary) {
+        const translated = document.createElement('div');
+        translated.className = 'line-translated';
+        translated.textContent = row.primary;
+        rowEl.appendChild(translated);
+      }
+      return rowEl;
+    });
+    flowEl.replaceChildren(...nodes);
+    applyViewportSize();
+    return { changed: true, rowAdvanced, rollDistance: computeRollStep() };
+  }
+
+  function show(text, isFinal, originalText, segment, options = {}) {
     if (!text) {
       if (!isFinal) {
-        liveText = '';
-        renderCaption();
+        renderCaption(captionTrack.applyCaption({ text: '', isFinal: false }));
       }
       return;
     }
 
-    if (isFinal) {
-      const finalKey = segment?.id;
-      if (!finalKey) return;
-      if (finalKey === lastFinalized) return;
-      lastFinalized = finalKey;
-      appendCommitted(text, segment);
-      liveText = '';
-      if (isRenderableSegment(segment)) updateCachedSegment(segment);
-    } else {
-      liveText = text.trim();
-    }
-    renderCaption();
+    const source = options.source || 'live';
+    if (isFinal && !segment?.id) return;
 
+    if (isFinal) {
+      if (isRenderableSegment(segment)) updateCachedSegment(segment);
+    }
+
+    const rollFromHeight = flowEl ? flowEl.scrollHeight : 0;
+    const hadRollText = captionTrack.snapshot().hasText;
+
+    const model = captionTrack.applyCaption({ text, isFinal, original: originalText, segment, source });
+    if (!model.changed) return;
     capturing = true;
     placeholder.classList.remove('show');
     linesEl.style.display = '';
     linesEl.style.opacity = '1';
+    const rendered = renderCaption(model);
+    const rollDistance = rendered.rowAdvanced ? rendered.rollDistance : undefined;
+    const shouldRoll = model.animate || (model.reason === 'partial' && rendered.rowAdvanced);
+    if (shouldRoll && rendered.changed) animateCaptionRoll(rollFromHeight, hadRollText, rollDistance);
 
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
@@ -328,16 +429,19 @@
 
   function clearCaptions() {
     clearTimeout(fadeTimer);
+    resetCaptionRoll();
     linesEl.style.opacity = '0';
     setTimeout(clearTrack, 280);
     capturing = false;
   }
 
   function clearTrack() {
-    committedSegments = [];
-    liveText = '';
-    lastFinalized = '';
-    if (flowEl) flowEl.textContent = '';
+    resetCaptionRoll();
+    captionTrack.clear();
+    if (flowEl) {
+      flowEl.dataset.captionSignature = '';
+      flowEl.replaceChildren();
+    }
     if (linesEl) {
       linesEl.style.opacity = '1';
       linesEl.style.display = 'none';
@@ -347,11 +451,7 @@
 
   function applySegmentUpdate(segment) {
     if (!segment?.id || !segment.text) return;
-    const item = committedSegments.find(s => s.id === segment.id);
-    if (item) {
-      item.text = segment.text;
-      renderCaption();
-    }
+    renderCaption(captionTrack.applySegmentUpdate(segment));
     updateCachedSegment(segment);
   }
 

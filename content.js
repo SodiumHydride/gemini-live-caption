@@ -6,15 +6,21 @@
 
   const DEBUG = false;
   const dbg = DEBUG ? (...args) => console.log('[Content]', ...args) : () => {};
+  if (!window.CaptionTrack) {
+    throw new Error('caption-track.js must be injected before content.js');
+  }
 
   const HOST_ID = 'gemini-live-caption-host';
   const STORE_KEY = 'captionLayout';
   let MAX_LINES = 2; // Fixed visual-line viewport (broadcast-style rolling window)
+  let bilingualMode = false;
+  const captionTrack = window.CaptionTrack.create({ bilingualMode, maxChars: 720 });
 
   let shadow, wrap, linesEl, flowEl, placeholder, pipBtn, statusIndicator;
   let historyPanel, historyScroll, historyOverlay;
   let historyVisible = false;
   let fadeTimer = null, capturing = false;
+  let captionRollFrame = 0, captionRollTimer = 0;
   let pipActive = false; // When true, suppress overlay display (PiP is showing captions)
   let layout = { x: null, y: null, w: 560 };
   let initGeneration = 0;  // Prevents stale async callbacks from building on wrong shadow
@@ -41,16 +47,21 @@
       host.style.setProperty('--cap-font-size', FONT_MAP[s.fontSize] ?? FONT_MAP.medium);
     }
     if (s.bgOpacity !== undefined) host.style.setProperty('--cap-bg', `rgba(0,0,0,${s.bgOpacity})`);
-    if (s.overlayMaxLines) {
-      MAX_LINES = s.overlayMaxLines;
+    if (s.overlayMaxLines) MAX_LINES = s.overlayMaxLines;
+    if (s.bilingualMode !== undefined) {
+      bilingualMode = !!s.bilingualMode;
+      captionTrack.configure({ bilingualMode });
+      renderCaption();
     }
     if (s.textColor) {
       host.style.setProperty('--cap-text', s.textColor);
     }
-    if (s.fontSize || s.overlayMaxLines) applyViewportSize();
+    if (s.fontSize || s.overlayMaxLines || s.bilingualMode !== undefined) applyViewportSize();
   }
 
   function init() {
+    resetCaptionRoll();
+
     // Disconnect previous observer to prevent accumulation
     if (hostObserver) {
       hostObserver.disconnect();
@@ -82,7 +93,7 @@
     document.documentElement.appendChild(host);
     shadow = host.attachShadow({ mode: 'closed' });
     const gen = ++initGeneration;
-    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity', 'overlayMaxLines', 'textColor'], r => {
+    chrome.storage.local.get([STORE_KEY, 'fontSize', 'bgOpacity', 'overlayMaxLines', 'textColor', 'bilingualMode'], r => {
       if (gen !== initGeneration) return;  // Stale callback, ignore
       if (r[STORE_KEY]) Object.assign(layout, r[STORE_KEY]);
       if (r.overlayMaxLines) MAX_LINES = r.overlayMaxLines;
@@ -163,7 +174,7 @@
       pipBtn.style.display = 'none';
     }
 
-    // Fixed N-line viewport; single flowing text block (broadcast-style roll)
+    // Fixed N-line viewport; caption-track owns text state, this Adapter renders it.
     linesEl = document.createElement('div');
     linesEl.className = 'lines';
 
@@ -332,10 +343,43 @@
         user-select: text;
         -webkit-user-select: text;
         cursor: text;
+        transform: translate3d(0, 0, 0);
+        will-change: transform;
+        display: flex;
+        flex-direction: column;
+        gap: .12em;
+      }
+
+      .caption-row {
+        display: flex;
+        flex-direction: column;
+        gap: .05em;
+        min-width: 0;
+      }
+
+      .line-original {
+        color: rgba(255,255,255,.62);
+        font-size: .64em;
+        font-weight: 500;
+        line-height: 1.25;
+        text-align: center;
+        text-shadow: 0 1px 2px rgba(0,0,0,.75);
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-line-clamp: 1;
+        -webkit-box-orient: vertical;
       }
 
       .line-translated {
         color: var(--cap-text, #fff);
+        font-size: 1em;
+        font-weight: 650;
+        line-height: var(--cap-line-h, 1.4em);
+        overflow: hidden;
+        overflow-wrap: anywhere;
+        display: -webkit-box;
+        -webkit-line-clamp: 1;
+        -webkit-box-orient: vertical;
       }
 
       .ph {
@@ -521,94 +565,189 @@
       .lines {
         cursor: pointer;
       }
+
+      @media (prefers-reduced-motion: reduce) {
+        .flow {
+          transition: none !important;
+          transform: none !important;
+        }
+      }
     `;
   }
 
   // ==================== CAPTION VIEWPORT ====================
-  // Broadcast model: one continuous string (committed + live partial) inside a
-  // fixed-height viewport. flex-end + overflow:hidden shows the bottom N visual
-  // lines — no translateY, no per-update animation, no extra DOM layers.
+  // Caption-track owns the subtitle facts. The overlay is a rendering Adapter:
+  // it maps track snapshots into safe DOM, sizing, and live row-advance motion.
+  const CAP_LINE_HEIGHT_RATIO = 1.36;
+  const CAP_SECONDARY_HEIGHT_RATIO = 0.84;
+  const CAP_ROW_GAP_RATIO = 0.12;
+  const CAP_LINE_WIDTH_FACTOR = 0.88;
+  const CAP_ROLL_BUFFER_ROWS = 1;
 
-  const COMMITTED_MAX_CHARS = 600;
-  let committedSegments = [];
-  let liveText = '';
-  let lastFinalized = '';
-
-  function joinSegments(a, b) {
-    const left = (a || '').trim();
-    const right = (b || '').trim();
-    if (!left) return right;
-    if (!right) return left;
-    if (/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]$/.test(left)) return left + right;
-    return left + ' ' + right;
+  function measureFontSizePx() {
+    if (!flowEl) return 28;
+    const target = flowEl.querySelector('.line-translated') || flowEl;
+    const cs = getComputedStyle(target);
+    return parseFloat(cs.fontSize) || 16;
   }
 
   function measureLineHeightPx() {
-    if (!flowEl) return 28;
-    const cs = getComputedStyle(flowEl);
-    const fontSize = parseFloat(cs.fontSize) || 16;
-    const lh = parseFloat(cs.lineHeight);
-    return Number.isFinite(lh) ? lh : fontSize * 1.4;
+    return measureFontSizePx() * CAP_LINE_HEIGHT_RATIO;
   }
 
   function applyViewportSize() {
     if (!shadow?.host || !flowEl) return;
+    const fontSize = measureFontSizePx();
     const lh = measureLineHeightPx();
+    const model = captionTrack.snapshot();
+    const hasOriginal = model.rows.some(row => row.secondary);
+    const secondaryHeight = hasOriginal ? fontSize * CAP_SECONDARY_HEIGHT_RATIO : 0;
+    const rowGap = fontSize * CAP_ROW_GAP_RATIO;
     shadow.host.style.setProperty('--cap-line-h', `${lh}px`);
-    shadow.host.style.setProperty('--cap-viewport-h', `${lh * MAX_LINES}px`);
+    shadow.host.style.setProperty('--cap-viewport-h', `${(lh + secondaryHeight) * MAX_LINES + rowGap * Math.max(0, MAX_LINES - 1)}px`);
   }
 
-  function renderCaption() {
-    if (!flowEl) return;
-    const committedText = committedSegments.reduce((acc, seg) => joinSegments(acc, seg.text), '');
-    const display = joinSegments(committedText, liveText);
-    if (flowEl.textContent !== display) flowEl.textContent = display;
+  function computeViewportHeight() {
+    const fontSize = measureFontSizePx();
+    const hasOriginal = captionTrack.snapshot().rows.some(row => row.secondary);
+    const rowHeight = measureLineHeightPx() + (hasOriginal ? fontSize * CAP_SECONDARY_HEIGHT_RATIO : 0);
+    return rowHeight * MAX_LINES + fontSize * CAP_ROW_GAP_RATIO * Math.max(0, MAX_LINES - 1);
   }
 
-  function appendCommitted(text, segment) {
-    const s = text.trim();
-    if (!s) return;
-    const id = segment?.id || segment?.segmentId;
-    if (!id) {
-      dbg('Final caption ignored: missing segment id');
-      return;
+  function computeLineUnits() {
+    if (!flowEl) return 42;
+    const fontSize = measureFontSizePx();
+    const width = flowEl.clientWidth || linesEl?.clientWidth || 0;
+    if (!width || !fontSize) return 42;
+    return Math.max(10, (width / fontSize) * CAP_LINE_WIDTH_FACTOR);
+  }
+
+  function computeRollStep() {
+    return measureLineHeightPx() + measureFontSizePx() * CAP_ROW_GAP_RATIO;
+  }
+
+  function prefersReducedMotion() {
+    return typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
+  function resetCaptionRoll() {
+    if (captionRollFrame) {
+      cancelAnimationFrame(captionRollFrame);
+      captionRollFrame = 0;
     }
-    if (committedSegments.some(item => item.id === id)) return;
-    committedSegments.push({ id, text: s });
-    while (committedSegments.length > 1 && committedSegments.reduce((n, item) => n + item.text.length, 0) > COMMITTED_MAX_CHARS) {
-      committedSegments.shift();
+    if (captionRollTimer) {
+      clearTimeout(captionRollTimer);
+      captionRollTimer = 0;
+    }
+    if (flowEl) {
+      flowEl.style.transition = '';
+      flowEl.style.transform = '';
     }
   }
 
-  function show(text, isFinal, originalText, segment) {
+  function animateCaptionRoll(previousHeight, hadPreviousText, preferredDistance) {
+    resetCaptionRoll();
+    if (!flowEl || prefersReducedMotion()) return;
+
+    const nextHeight = flowEl.scrollHeight;
+    const delta = nextHeight - (Number.isFinite(previousHeight) ? previousHeight : 0);
+    const measuredDistance = delta > 1 ? Math.min(computeViewportHeight(), delta) : 0;
+    const distance = Number.isFinite(preferredDistance) && preferredDistance > 1
+      ? preferredDistance
+      : measuredDistance;
+    if (!hadPreviousText || distance <= 1) return;
+    if (!Number.isFinite(distance) || distance <= 1) return;
+
+    flowEl.style.transition = 'none';
+    flowEl.style.transform = `translate3d(0, ${distance}px, 0)`;
+    flowEl.getBoundingClientRect();
+
+    captionRollFrame = requestAnimationFrame(() => {
+      captionRollFrame = 0;
+      if (!flowEl) return;
+      flowEl.style.transition = 'transform 260ms var(--ease-out-expo, cubic-bezier(0.16, 1, 0.3, 1))';
+      flowEl.style.transform = 'translate3d(0, 0, 0)';
+      captionRollTimer = setTimeout(() => {
+        captionRollTimer = 0;
+        if (flowEl) flowEl.style.transition = '';
+      }, 280);
+    });
+  }
+
+  function renderCaption(model = captionTrack.snapshot()) {
+    if (!flowEl) return { changed: false, rowAdvanced: false, rollDistance: 0 };
+    const sourceRows = model.rows.length
+      ? model.rows
+      : (model.primaryText || model.secondaryText ? [{ id: 'single', primary: model.primaryText, secondary: model.secondaryText, live: true }] : []);
+    const shaped = window.CaptionTrack.shapeRows(sourceRows, {
+      maxRows: MAX_LINES + CAP_ROLL_BUFFER_ROWS,
+      maxUnits: computeLineUnits(),
+    });
+    const rows = shaped.rows;
+    const signature = rows.map(row => `${row.id}:${row.live ? '1' : '0'}:${row.secondary}\n${row.primary}`).join('\n---\n');
+    const previousTailKey = flowEl.dataset.captionTailKey || '';
+    const previousTotalRows = parseInt(flowEl.dataset.captionTotalRows || '0', 10) || 0;
+    const rowAdvanced = !!previousTailKey && shaped.tailKey !== previousTailKey && shaped.totalRows > previousTotalRows;
+    if (flowEl.dataset.captionSignature === signature) {
+      flowEl.dataset.captionTailKey = shaped.tailKey;
+      flowEl.dataset.captionTotalRows = String(shaped.totalRows);
+      return { changed: false, rowAdvanced, rollDistance: computeRollStep() };
+    }
+    flowEl.dataset.captionSignature = signature;
+    flowEl.dataset.captionTailKey = shaped.tailKey;
+    flowEl.dataset.captionTotalRows = String(shaped.totalRows);
+
+    const nodes = rows.map(row => {
+      const rowEl = document.createElement('div');
+      rowEl.className = row.live ? 'caption-row live' : 'caption-row';
+      if (row.secondary) {
+        const original = document.createElement('div');
+        original.className = 'line-original';
+        original.textContent = row.secondary;
+        rowEl.appendChild(original);
+      }
+      if (row.primary) {
+        const translated = document.createElement('div');
+        translated.className = 'line-translated';
+        translated.textContent = row.primary;
+        rowEl.appendChild(translated);
+      }
+      return rowEl;
+    });
+    flowEl.replaceChildren(...nodes);
+    applyViewportSize();
+    return { changed: true, rowAdvanced, rollDistance: computeRollStep() };
+  }
+
+  function show(text, isFinal, originalText, segment, options = {}) {
     if (!text) {
       if (!isFinal) {
-        liveText = '';
-        renderCaption();
+        renderCaption(captionTrack.applyCaption({ text: '', isFinal: false }));
       }
       return;
     }
 
-    if (isFinal) {
-      const finalKey = segment?.id;
-      if (!finalKey) {
-        dbg('Final caption ignored: missing segment metadata');
-        return;
-      }
-      if (finalKey === lastFinalized) return;
-      lastFinalized = finalKey;
-      appendCommitted(text, segment);
-      liveText = '';
-    } else {
-      liveText = text.trim();
+    const source = options.source || 'live';
+    if (isFinal && !segment?.id) {
+      dbg('Final caption ignored: missing segment metadata');
+      return;
     }
-    renderCaption();
 
+    const rollFromHeight = flowEl ? flowEl.scrollHeight : 0;
+    const hadRollText = captionTrack.snapshot().hasText;
+
+    const model = captionTrack.applyCaption({ text, isFinal, original: originalText, segment, source });
+    if (!model.changed) return;
     capturing = true;
     if (!pipActive) wrap.classList.add('vis');
     placeholder.classList.remove('show');
     linesEl.style.display = '';
     linesEl.style.opacity = '1';
+    const rendered = renderCaption(model);
+    const rollDistance = rendered.rowAdvanced ? rendered.rollDistance : undefined;
+    const shouldRoll = model.animate || (model.reason === 'partial' && rendered.rowAdvanced);
+    if (shouldRoll && rendered.changed) animateCaptionRoll(rollFromHeight, hadRollText, rollDistance);
 
     clearTimeout(fadeTimer);
     fadeTimer = setTimeout(() => {
@@ -626,10 +765,12 @@
   }
 
   function clearTrackState() {
-    committedSegments = [];
-    liveText = '';
-    lastFinalized = '';
-    if (flowEl) flowEl.textContent = '';
+    resetCaptionRoll();
+    captionTrack.clear();
+    if (flowEl) {
+      flowEl.dataset.captionSignature = '';
+      flowEl.replaceChildren();
+    }
     if (linesEl) {
       linesEl.style.opacity = '1';
       linesEl.style.display = 'none';
@@ -639,11 +780,7 @@
 
   function applySegmentUpdate(segment) {
     if (!segment?.id || !segment.text) return;
-    const item = committedSegments.find(s => s.id === segment.id);
-    if (item) {
-      item.text = segment.text;
-      renderCaption();
-    }
+    renderCaption(captionTrack.applySegmentUpdate(segment));
     updateCachedSegment(segment);
     postToPiP({ type: 'TRANSCRIPT_SEGMENT_UPDATED', segment });
   }
@@ -748,6 +885,7 @@
   // ==================== CLEAR ====================
   function clearCaptions() {
     clearTimeout(fadeTimer);
+    resetCaptionRoll();
     fadeOutAndClear();
   }
 
@@ -1027,6 +1165,7 @@
       html = html
         .replace('href="pip.css"', `href="${chrome.runtime.getURL('pip.css')}"`)
         .replace('src="i18n.js"', `src="${chrome.runtime.getURL('i18n.js')}"`)
+        .replace('src="caption-track.js"', `src="${chrome.runtime.getURL('caption-track.js')}"`)
         .replace('src="pip.js"', `src="${chrome.runtime.getURL('pip.js')}"`);
       // Standard Document PiP pattern (per Google docs): write extension-controlled HTML
       // into the PiP window. Source is the extension's own pip.html via chrome.runtime.getURL() -
@@ -1126,7 +1265,7 @@
     await refreshTranscriptFromStore();
     const recent = captionHistory.filter(isRenderableSegment).slice(-PIP_BUFFER_SIZE);
     for (const entry of recent) {
-      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true, original: entry.original, segment: entry });
+      postToPiP({ type: 'CAPTION_UPDATE', text: entry.text, isFinal: true, original: entry.original, segment: entry, source: 'hydrate' });
     }
   }
 
@@ -1173,9 +1312,7 @@
             if (oldHost) oldHost.remove();
             suppressObserver = false;
             shadow = wrap = linesEl = flowEl = placeholder = statusIndicator = null;
-            committedSegments = [];
-            liveText = '';
-            lastFinalized = '';
+            captionTrack.clear();
             init();
           } catch (reinitErr) {
             dbg('Reinit failed:', reinitErr);
