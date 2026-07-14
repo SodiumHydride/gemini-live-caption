@@ -529,9 +529,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // ==================== EXPORT SUBTITLES ====================
-  // Common helper for download buttons: temporarily flash a status label,
-  // then restore the resting label after `restoreMs`.
+  // ==================== EXPORT ====================
   function flashStatus(btn, statusKey, statusFallback, restingKey, restingFallback, restoreMs = 2000) {
     btn.textContent = tr(statusKey, statusFallback);
     setTimeout(() => {
@@ -564,6 +562,32 @@ document.addEventListener('DOMContentLoaded', async () => {
       } catch (err) {
         console.error('Export captions failed:', err);
         flashStatus(exportCaptionsBtn, 'export_failed', 'Failed', 'export_subtitles', 'Export Subtitles (SRT)');
+      }
+    });
+  }
+
+  const exportSettingsBtn = document.getElementById('exportSettings');
+  if (exportSettingsBtn) {
+    exportSettingsBtn.addEventListener('click', async () => {
+      exportSettingsBtn.disabled = true;
+      exportSettingsBtn.textContent = tr('export_loading', 'Exporting...');
+      try {
+        const response = await chrome.runtime.sendMessage({ type: 'EXPORT_SETTINGS' });
+        if (response?.ok && response.settings) {
+          const blob = new Blob([JSON.stringify(response.settings, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'gemini-live-caption-settings.json';
+          a.click();
+          URL.revokeObjectURL(url);
+          flashStatus(exportSettingsBtn, 'export_done', 'Downloaded!', 'export_settings', 'Export Settings');
+        } else {
+          flashStatus(exportSettingsBtn, 'export_failed', 'Failed', 'export_settings', 'Export Settings');
+        }
+      } catch (err) {
+        console.error('Export settings failed:', err);
+        flashStatus(exportSettingsBtn, 'export_failed', 'Failed', 'export_settings', 'Export Settings');
       }
     });
   }

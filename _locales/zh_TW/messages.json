@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini 即時字幕",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "使用 Gemini Live Translate 為任意分頁音訊產生即時翻譯字幕，支援 70+ 語言與子母畫面。",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "切換即時字幕",
+    "description": "Keyboard shortcut description"
+  }
+}

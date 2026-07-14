@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Gemini Live Caption",
-  "version": "1.0.1",
-  "description": "Real-time translated captions for any tab audio — end-to-end Gemini 3.5 Live Translate, 70+ languages, Picture-in-Picture.",
+  "name": "__MSG_extensionName__",
+  "version": "1.1.0",
+  "default_locale": "en",
+  "description": "__MSG_extensionDescription__",
   "author": "NaH",
   "homepage_url": "https://github.com/SodiumHydride/gemini-live-caption",
   "minimum_chrome_version": "116",
@@ -15,7 +16,7 @@
   "permissions": ["tabCapture", "offscreen", "storage", "tabs", "activeTab", "scripting"],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Gemini Live Caption",
+    "default_title": "__MSG_extensionName__",
     "default_icon": {
       "16": "icon-16.png",
       "32": "icon-32.png",
@@ -32,7 +33,7 @@
   "commands": {
     "toggle-capture": {
       "suggested_key": { "default": "Alt+C" },
-      "description": "Toggle live caption"
+      "description": "__MSG_toggleCaptionCommand__"
     }
   },
   "web_accessible_resources": [

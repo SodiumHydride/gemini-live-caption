@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini Live Caption",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Переводные субтитры в реальном времени для аудио вкладок с Gemini Live Translate, 70+ языков и PiP.",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "Переключить live-субтитры",
+    "description": "Keyboard shortcut description"
+  }
+}

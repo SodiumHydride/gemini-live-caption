@@ -159,7 +159,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     // Setup-level changes require WebSocket reconnect because Live API session
     // configuration is immutable after the opening setup message.
-    if (msg.settings.targetLanguage || msg.settings.echoTargetLanguage !== undefined || msg.settings.captionTerminology !== undefined) {
+    if (msg.settings.targetLanguage || msg.settings.echoTargetLanguage !== undefined) {
       if (websocket && websocket.readyState === WebSocket.OPEN) {
         reconnectWebSocket();
       }
@@ -195,7 +195,6 @@ async function startCapture(streamId, settings) {
     audioGain: settings.audioGain ?? 1.0,
     noiseGate: settings.noiseGate ?? 0,
     echoTargetLanguage: settings.echoTargetLanguage ?? false,
-    captionTerminology: settings.captionTerminology || '',
   };
 
   // Restore bilingualMode from settings
@@ -516,28 +515,12 @@ function buildSetupMessage() {
     sessionResumption: {},
   };
 
-  setupConfig.systemInstruction = buildTranslationSystemInstruction(
-    targetLang,
-    currentSettings.captionTerminology || ''
-  );
-
   // If we have a resumption handle from a previous session, include it
   if (resumptionHandle) {
     setupConfig.sessionResumption = { handle: resumptionHandle };
   }
 
   return { setup: setupConfig };
-}
-
-function buildTranslationSystemInstruction(targetLang, terminology) {
-  const glossary = terminology.trim();
-  const text = [
-    'You are a realtime speech translator producing readable subtitles.',
-    `Translate speech into ${targetLang}. Preserve speaker meaning; do not answer, explain, summarize, or add facts.`,
-    'Keep names, numbers, dates, units, and product terms accurate. Prefer concise subtitle phrasing with natural punctuation.',
-    glossary ? `Terminology and style rules:\n${glossary}` : 'Terminology and style rules: none',
-  ].join('\n');
-  return { parts: [{ text }] };
 }
 
 function sendSetupMessage() {

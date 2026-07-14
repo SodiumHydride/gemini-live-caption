@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini 实时字幕",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "使用 Gemini Live Translate 为任意标签页音频生成实时翻译字幕，支持 70+ 语言和画中画。",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "切换实时字幕",
+    "description": "Keyboard shortcut description"
+  }
+}

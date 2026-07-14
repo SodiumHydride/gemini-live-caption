@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini Live Caption",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Real-time translated captions for any tab audio with Gemini Live Translate, 70+ languages, and Picture-in-Picture.",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "Toggle live caption",
+    "description": "Keyboard shortcut description"
+  }
+}

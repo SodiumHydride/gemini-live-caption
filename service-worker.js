@@ -17,6 +17,12 @@ const SRT_MIN_DURATION_MS = 833;
 const SRT_MAX_DURATION_MS = 7000;
 const REVISION_MODES = new Set(['off', 'polish']);
 const REVISION_MODEL = 'gemini-3.5-flash';
+const EXPORTABLE_SETTINGS = [
+  'targetLanguage', 'fontSize', 'bgOpacity', 'audioGain', 'noiseGate',
+  'captionPosition', 'textColor', 'bilingualMode', 'echoTargetLanguage',
+  'overlayMaxLines', 'pipMaxLines', 'captionRevisionMode',
+  'captionTerminology', 'uiLanguage',
+];
 let revisionQueue = Promise.resolve();
 
 // ==================== STATE MANAGEMENT ====================
@@ -223,6 +229,18 @@ function isFromOffscreen(sender) {
   return sender.url?.startsWith(`chrome-extension://${chrome.runtime.id}/offscreen`);
 }
 
+function defaultTargetLanguage() {
+  let ui = '';
+  try { ui = chrome.i18n.getUILanguage() || ''; } catch (e) {}
+  const lower = ui.toLowerCase();
+  if (lower.startsWith('zh-cn') || lower.startsWith('zh-hans') || lower === 'zh' || lower.startsWith('zh-sg')) return 'zh-Hans';
+  if (lower.startsWith('zh-tw') || lower.startsWith('zh-hk') || lower.startsWith('zh-hant') || lower.startsWith('zh-mo')) return 'zh-Hant';
+  if (lower.startsWith('pt-br')) return 'pt-BR';
+  if (lower.startsWith('pt-pt')) return 'pt-PT';
+  const base = lower.split(/[-_]/)[0];
+  return ['en', 'ja', 'ko', 'es', 'fr', 'de', 'ru', 'ar', 'hi'].includes(base) ? base : 'en';
+}
+
 // Handle messages from popup, offscreen, and content scripts
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'TOGGLE_CAPTURE') {
@@ -244,6 +262,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const { captureState = 'idle', activeTabId = null } = await chrome.storage.session.get(['captureState', 'activeTabId']);
       sendResponse({ state: captureState, tabId: activeTabId });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'EXPORT_SETTINGS') {
+    if (!isFromPopup(sender)) return false;
+    (async () => {
+      const data = await chrome.storage.local.get(EXPORTABLE_SETTINGS);
+      sendResponse({
+        ok: true,
+        settings: {
+          schemaVersion: 1,
+          exportedAt: new Date().toISOString(),
+          targetLanguage: data.targetLanguage || defaultTargetLanguage(),
+          fontSize: data.fontSize || 'medium',
+          bgOpacity: data.bgOpacity ?? 0.75,
+          audioGain: data.audioGain ?? 1,
+          noiseGate: data.noiseGate ?? 0,
+          captionPosition: data.captionPosition || 'bottom-center',
+          textColor: data.textColor || '#ffffff',
+          bilingualMode: !!data.bilingualMode,
+          echoTargetLanguage: !!data.echoTargetLanguage,
+          overlayMaxLines: data.overlayMaxLines ?? 2,
+          pipMaxLines: data.pipMaxLines ?? 2,
+          captionRevisionMode: REVISION_MODES.has(data.captionRevisionMode) ? data.captionRevisionMode : 'off',
+          captionTerminology: data.captionTerminology || '',
+          uiLanguage: data.uiLanguage || 'en',
+        },
+      });
     })();
     return true;
   }
@@ -484,7 +531,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   ]);
   const defaults = {};
   if (existing.apiKey === undefined) defaults.apiKey = '';
-  if (!existing.targetLanguage) defaults.targetLanguage = 'zh-Hans';
+  if (!existing.targetLanguage) defaults.targetLanguage = defaultTargetLanguage();
   if (!existing.fontSize) defaults.fontSize = 'medium';
   if (existing.bgOpacity === undefined) defaults.bgOpacity = 0.75;
   if (existing.overlayMaxLines === undefined) defaults.overlayMaxLines = existing.maxLines ?? 2;
@@ -577,7 +624,7 @@ async function startCapture(tabId) {
     const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
     const settings = await chrome.storage.local.get([
       'apiKey', 'targetLanguage', 'audioGain', 'noiseGate', 'bilingualMode',
-      'echoTargetLanguage', 'captionTerminology'
+      'echoTargetLanguage'
     ]);
     await ensureOffscreenDocument();
 
@@ -591,7 +638,6 @@ async function startCapture(tabId) {
         noiseGate: settings.noiseGate ?? 0,
         bilingualMode: settings.bilingualMode ?? false,
         echoTargetLanguage: settings.echoTargetLanguage ?? false,
-        captionTerminology: settings.captionTerminology || '',
       },
     });
 
@@ -852,16 +898,28 @@ async function requestCaptionRevision(segment, settings) {
 
 function buildRevisionPrompt(segment, settings) {
   const glossary = (settings.captionTerminology || '').trim();
+  const targetLanguage = displayLanguageName(settings.targetLanguage || segment.targetLanguage);
   return [
     'You revise one finalized live-caption translation segment for readability.',
     'Preserve meaning, numbers, names, and timing. Do not add facts. Do not summarize.',
     'Improve punctuation, spacing, terminology consistency, and subtitle readability.',
     'Return exactly JSON: {"text":"..."}',
     glossary ? `Glossary and style rules:\n${glossary}` : 'Glossary and style rules: none',
-    `Target language: ${settings.targetLanguage || segment.targetLanguage || 'unknown'}`,
+    `Target language: ${targetLanguage}`,
     segment.original ? `Source transcript:\n${segment.original}` : 'Source transcript: unavailable',
     `Translated caption:\n${segment.rawText}`,
   ].join('\n\n');
+}
+
+function displayLanguageName(code) {
+  const value = String(code || '').trim();
+  if (!value) return 'unknown';
+  try {
+    const name = new Intl.DisplayNames(['en'], { type: 'language' }).of(value);
+    return name ? `${name} (${value})` : value;
+  } catch (e) {
+    return value;
+  }
 }
 
 async function updateTranscriptSegment(id, patch) {

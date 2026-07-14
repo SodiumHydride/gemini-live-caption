@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini Live Caption",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Legendas traduzidas em tempo real para áudio de qualquer guia com Gemini Live Translate, 70+ idiomas e PiP.",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "Alternar legendas ao vivo",
+    "description": "Keyboard shortcut description"
+  }
+}

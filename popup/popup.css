@@ -14,19 +14,19 @@
 
 :root {
   /* Palette */
-  --bg-deep:        #07070d;
-  --bg-surface:     #0e0e18;
-  --bg-panel:       rgba(255, 255, 255, 0.03);
-  --border-glass:   rgba(255, 255, 255, 0.06);
-  --border-hover:   rgba(255, 255, 255, 0.12);
+  --bg-deep:        #090a10;
+  --bg-surface:     #11131b;
+  --bg-panel:       rgba(255, 255, 255, 0.045);
+  --border-glass:   rgba(255, 255, 255, 0.085);
+  --border-hover:   rgba(255, 255, 255, 0.16);
   --text-primary:   #f0f0f5;
-  --text-secondary: rgba(240, 240, 245, 0.55);
-  --text-tertiary:  rgba(240, 240, 245, 0.35);
+  --text-secondary: rgba(240, 240, 245, 0.68);
+  --text-tertiary:  rgba(240, 240, 245, 0.46);
 
   /* Accent spectrum */
-  --accent-start:   #6366f1;
-  --accent-end:     #a855f7;
-  --accent-glow:    rgba(99, 102, 241, 0.35);
+  --accent-start:   #3b82f6;
+  --accent-end:     #14b8a6;
+  --accent-glow:    rgba(20, 184, 166, 0.22);
 
   /* Active / capturing — teal-emerald */
   --active-start:   #10b981;
@@ -46,12 +46,13 @@
 }
 
 body {
-  width: 360px;
-  max-height: 540px;
+  width: 350px;
+  max-height: 560px;
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--bg-deep);
   color: var(--text-primary);
+  color-scheme: dark;
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
   font-size: 13px;
   line-height: 1.5;
@@ -72,14 +73,13 @@ body::-webkit-scrollbar-thumb {
 /* ── Popup Container ─────────────────────────────────────── */
 .popup-container {
   position: relative;
-  padding: 20px;
+  padding: 16px 18px;
   min-height: 100%;
 
   /* Layered gradient background with grain-like texture */
   background:
-    radial-gradient(ellipse 120% 60% at 75% -10%, rgba(99, 102, 241, 0.10) 0%, transparent 60%),
-    radial-gradient(ellipse 100% 50% at 10% 100%, rgba(168, 85, 247, 0.07) 0%, transparent 55%),
-    linear-gradient(180deg, #0a0a12 0%, #0c0c1a 40%, #0e0e1c 100%);
+    radial-gradient(ellipse 100% 50% at 85% -10%, rgba(59, 130, 246, 0.10) 0%, transparent 62%),
+    linear-gradient(180deg, #090a10 0%, #0d0f17 48%, #10121a 100%);
 }
 
 /* Subtle animated shimmer overlay */
@@ -88,8 +88,7 @@ body::-webkit-scrollbar-thumb {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle 200px at 80% 15%, rgba(99,102,241,0.06), transparent),
-    radial-gradient(circle 160px at 20% 85%, rgba(168,85,247,0.04), transparent);
+    radial-gradient(circle 200px at 80% 15%, rgba(20,184,166,0.04), transparent);
   pointer-events: none;
   z-index: 0;
 }
@@ -104,19 +103,19 @@ body::-webkit-scrollbar-thumb {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .logo {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .logo-icon {
-  width: 42px;
-  height: 42px;
-  border-radius: var(--radius-md);
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
   background: linear-gradient(135deg, var(--accent-start), var(--accent-end));
   display: flex;
   align-items: center;
@@ -128,7 +127,7 @@ body::-webkit-scrollbar-thumb {
 }
 
 .logo-text h1 {
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: -0.01em;
   color: var(--text-primary);
@@ -136,7 +135,7 @@ body::-webkit-scrollbar-thumb {
 }
 
 .logo-text .subtitle {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-secondary);
   margin-top: 2px;
   letter-spacing: 0.02em;
@@ -147,7 +146,7 @@ body::-webkit-scrollbar-thumb {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 12px;
+  padding: 5px 10px;
   border-radius: 20px;
   background: var(--bg-panel);
   border: 1px solid var(--border-glass);
@@ -193,13 +192,13 @@ body::-webkit-scrollbar-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  padding: 15px 20px;
+  gap: 9px;
+  padding: 12px 16px;
   border: none;
   border-radius: var(--radius-md);
   cursor: pointer;
   font-family: inherit;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.01em;
   color: #fff;
@@ -213,8 +212,8 @@ body::-webkit-scrollbar-thumb {
   /* Default gradient — purple/indigo */
   background: linear-gradient(135deg, var(--accent-start) 0%, var(--accent-end) 100%);
   box-shadow:
-    0 0 0 1px rgba(255,255,255,0.10) inset,
-    0 4px 20px var(--accent-glow),
+    0 0 0 1px rgba(255,255,255,0.12) inset,
+    0 4px 14px var(--accent-glow),
     0 1px 3px rgba(0,0,0,0.4);
 }
 
@@ -251,12 +250,12 @@ body::-webkit-scrollbar-thumb {
   transform: translateY(-1px);
   box-shadow:
     0 0 0 1px rgba(255,255,255,0.14) inset,
-    0 8px 32px var(--accent-glow),
+    0 7px 22px var(--accent-glow),
     0 2px 6px rgba(0,0,0,0.3);
 }
 
 .toggle-btn:hover::after {
-  opacity: 0.5;
+  opacity: 0.25;
 }
 
 .toggle-btn:active {
@@ -302,7 +301,7 @@ body::-webkit-scrollbar-thumb {
 /* ── Divider ─────────────────────────────────────────────── */
 .divider {
   height: 1px;
-  margin: 18px 0;
+  margin: 14px 0;
   background: linear-gradient(
     90deg,
     transparent 0%,
@@ -315,7 +314,7 @@ body::-webkit-scrollbar-thumb {
 
 /* ── Display Mode Info ──────────────────────────────────── */
 .display-mode-info {
-  padding: 10px 14px;
+  padding: 8px 10px;
   border-radius: var(--radius-sm);
   background: var(--bg-panel);
   border: 1px solid var(--border-glass);
@@ -330,12 +329,13 @@ body::-webkit-scrollbar-thumb {
 }
 
 .mode-hint {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.4;
 }
 
 .mode-hint-sub {
+  display: none;
   font-size: 11px;
   color: var(--text-tertiary);
   margin-top: 3px;
@@ -344,6 +344,7 @@ body::-webkit-scrollbar-thumb {
 }
 
 .display-mode-info.pip-active .mode-hint-sub {
+  display: block;
   color: var(--active-start);
 }
 
@@ -351,20 +352,20 @@ body::-webkit-scrollbar-thumb {
 .settings {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
 .setting-group {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
 }
 
 .setting-label {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--text-secondary);
-  letter-spacing: 0.03em;
+  letter-spacing: 0.01em;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -404,13 +405,14 @@ body::-webkit-scrollbar-thumb {
 
 .setting-input {
   width: 100%;
-  padding: 10px 42px 10px 14px;
+  min-height: 38px;
+  padding: 9px 40px 9px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-glass);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
   outline: none;
   transition:
     border-color 0.25s ease,
@@ -430,7 +432,7 @@ body::-webkit-scrollbar-thumb {
 
 .setting-textarea {
   width: 100%;
-  min-height: 76px;
+  min-height: 70px;
   resize: vertical;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
@@ -460,8 +462,8 @@ body::-webkit-scrollbar-thumb {
 .eye-btn {
   position: absolute;
   right: 4px;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -485,13 +487,14 @@ body::-webkit-scrollbar-thumb {
 /* ── Select (Language) ───────────────────────────────────── */
 .setting-select {
   width: 100%;
-  padding: 10px 36px 10px 14px;
+  min-height: 38px;
+  padding: 9px 34px 9px 12px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-glass);
   background: rgba(255, 255, 255, 0.03);
   color: var(--text-primary);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 12.5px;
   cursor: pointer;
   outline: none;
   -webkit-appearance: none;
@@ -533,7 +536,7 @@ body::-webkit-scrollbar-thumb {
 
 .seg-btn {
   flex: 1;
-  padding: 8px 0;
+  padding: 7px 0;
   border: none;
   border-radius: 6px;
   background: transparent;
@@ -710,10 +713,10 @@ body::-webkit-scrollbar-thumb {
 
 .toggle-switch {
   position: relative;
-  width: 40px;
-  height: 22px;
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 11px;
+  width: 36px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
   transition: background 0.2s var(--ease-out-expo);
   flex-shrink: 0;
 }
@@ -723,8 +726,8 @@ body::-webkit-scrollbar-thumb {
   position: absolute;
   top: 3px;
   left: 3px;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   background: var(--text-secondary);
   border-radius: 50%;
   transition: all 0.2s var(--ease-out-expo);
@@ -735,26 +738,27 @@ body::-webkit-scrollbar-thumb {
 }
 
 .toggle-checkbox:checked + .toggle-switch::after {
-  left: 21px;
+  left: 19px;
   background: white;
 }
 
 .setting-hint {
   font-size: 11px;
   color: var(--text-tertiary);
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 /* ── Export Section ──────────────────────────────────────── */
 .export-section {
   margin-top: 12px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 8px;
 }
 
 .export-btn {
-  flex: 1;
-  padding: 8px 12px;
+  min-height: 34px;
+  padding: 8px 10px;
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.03em;
@@ -764,6 +768,10 @@ body::-webkit-scrollbar-thumb {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.2s var(--ease-out-expo);
+}
+
+.export-btn:first-child {
+  grid-column: 1 / -1;
 }
 
 .export-btn:hover {

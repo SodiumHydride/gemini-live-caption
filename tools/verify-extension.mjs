@@ -20,6 +20,10 @@ function read(relPath) {
   return readFileSync(path.join(root, relPath), 'utf8');
 }
 
+function readJson(relPath) {
+  return JSON.parse(read(relPath));
+}
+
 function listFiles(dir, ext, acc = []) {
   for (const entry of readdirSync(path.join(root, dir), { withFileTypes: true })) {
     const rel = path.join(dir, entry.name);
@@ -56,11 +60,23 @@ function assertCaptionRollCapture(source, relPath) {
   assert(!preApply.includes('let hadRollText = false'), `${relPath} must not only prepare roll text state for final captions`);
 }
 
-const manifest = JSON.parse(read('manifest.json'));
+const manifest = readJson('manifest.json');
 assert(manifest.manifest_version === 3, 'manifest must stay on MV3');
+assert(manifest.default_locale === 'en', 'manifest must declare the default Chrome locale');
+assert(manifest.name === '__MSG_extensionName__', 'manifest name must use Chrome native localization');
+assert(manifest.description === '__MSG_extensionDescription__', 'manifest description must use Chrome native localization');
 assert(manifest.background?.service_worker === 'service-worker.js', 'background service worker must be service-worker.js');
 assert(manifest.action?.default_popup === 'popup/popup.html', 'popup entry must be popup/popup.html');
+assert(manifest.action?.default_title === '__MSG_extensionName__', 'popup title must use Chrome native localization');
 assert((manifest.permissions || []).includes('offscreen'), 'offscreen permission is required for tab audio capture');
+
+for (const locale of ['en', 'zh_CN', 'zh_TW', 'ja', 'ko', 'es', 'fr', 'de', 'pt_BR', 'ru']) {
+  const messages = readJson(`_locales/${locale}/messages.json`);
+  for (const key of ['extensionName', 'extensionDescription', 'toggleCaptionCommand']) {
+    assert(typeof messages[key]?.message === 'string' && messages[key].message.trim(), `${locale} locale message is missing: ${key}`);
+  }
+  assert(Array.from(messages.extensionDescription.message).length <= 132, `${locale} manifest description must fit Chrome's 132-character limit`);
+}
 
 const requiredFiles = new Set([
   'manifest.json',
@@ -98,9 +114,8 @@ assert(offscreen.includes("model: 'models/gemini-3.5-live-translate-preview'"), 
 assert(/generationConfig:\s*{[\s\S]*translationConfig:\s*{[\s\S]*targetLanguageCode/.test(offscreen), 'translationConfig must live under generationConfig');
 assert(/generationConfig:\s*{[\s\S]*translationConfig:\s*{[\s\S]*},\s*},\s*inputAudioTranscription:\s*{}/.test(offscreen), 'input transcription must live at setup top-level');
 assert(/inputAudioTranscription:\s*{},\s*outputAudioTranscription:\s*{}/.test(offscreen), 'output transcription must live at setup top-level');
-assert(offscreen.includes('setupConfig.systemInstruction = buildTranslationSystemInstruction'), 'Live setup must include translation system instruction');
-assert(offscreen.includes('return { parts: [{ text }] }'), 'systemInstruction must be a Gemini Content object');
-assert(offscreen.includes('captionTerminology'), 'Live setup must receive terminology settings');
+assert(!offscreen.includes('systemInstruction'), 'Live Translate setup must not use unsupported system instructions');
+assert(!offscreen.includes('captionTerminology'), 'Live Translate setup must not pretend to support terminology prompts');
 assert(!/\bmediaChunks\s*:/.test(offscreen), 'realtimeInput.mediaChunks must not return');
 assert(offscreen.includes("mimeType: 'audio/pcm;rate=16000'"), 'audio frames must declare 16kHz PCM');
 assert(offscreen.includes('sessionResumption'), 'session resumption must stay wired for long live sessions');
@@ -110,9 +125,14 @@ const serviceWorker = read('service-worker.js');
 assert(serviceWorker.includes("const TRANSCRIPT_SEGMENTS_KEY = 'transcriptSegments'"), 'service worker must own transcript segments');
 assert(serviceWorker.includes("const REVISION_MODEL = 'gemini-3.5-flash'"), 'caption revision model must be explicit');
 const exportBlock = messageBlock(serviceWorker, "if (msg.type === 'EXPORT_CAPTIONS')");
+const settingsExportBlock = messageBlock(serviceWorker, "if (msg.type === 'EXPORT_SETTINGS')");
 const toggleBlock = functionBlock(serviceWorker, 'toggleCapture');
 assert(exportBlock.includes('formatSRT(segments)'), 'SRT export must be generated from stored segments');
 assert(!exportBlock.includes('tabs.sendMessage'), 'SRT export must not ask content scripts for history');
+assert(settingsExportBlock.includes('EXPORTABLE_SETTINGS'), 'settings export must use the allowlisted setting keys');
+assert(!settingsExportBlock.includes('apiKey'), 'settings export must never include the API key');
+assert(!serviceWorker.includes('onMessageExternal'), 'extension must not expose settings through external messages');
+assert(!serviceWorker.includes('EXPORT_PEER_SETTINGS') && !serviceWorker.includes('GET_PEER_SETTINGS'), 'legacy peer settings export messages must not return');
 assert(serviceWorker.includes("files: ['i18n.js', 'caption-track.js', 'content.js']"), 'content injection must load caption-track before content.js');
 assert((toggleBlock.match(/startCapture\(tabId\)/g) || []).length === 1, 'global toggle must only start capture from idle');
 assert(/captureState === 'capturing'[\s\S]*await stopCapture\(\);/.test(toggleBlock), 'global toggle must stop an existing capture instead of switching source tabs');
@@ -189,6 +209,7 @@ for (const key of [
   'setting_echo_target',
   'setting_caption_revision',
   'setting_caption_terminology',
+  'export_settings',
   'status_capturing_other',
   'toggle_stopping',
 ]) {

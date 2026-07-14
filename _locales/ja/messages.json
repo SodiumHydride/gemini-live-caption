@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini Live Caption",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Gemini Live Translate で任意のタブ音声をリアルタイム翻訳字幕にします。70+ 言語と PiP に対応。",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "ライブ字幕を切り替え",
+    "description": "Keyboard shortcut description"
+  }
+}

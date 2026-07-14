@@ -1,0 +1,14 @@
+{
+  "extensionName": {
+    "message": "Gemini Live Caption",
+    "description": "Extension name"
+  },
+  "extensionDescription": {
+    "message": "Echtzeit-Übersetzungsuntertitel für Tab-Audio mit Gemini Live Translate, 70+ Sprachen und PiP.",
+    "description": "Extension description shown by Chrome"
+  },
+  "toggleCaptionCommand": {
+    "message": "Live-Untertitel umschalten",
+    "description": "Keyboard shortcut description"
+  }
+}
